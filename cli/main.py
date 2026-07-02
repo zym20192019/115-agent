@@ -246,6 +246,58 @@ def share_receive(ctx, url, path):
     click.secho(f"✓ 接收成功: task_id={result.get('task_id', '-')}", fg="green")
 
 
+# ── recycle ──────────────────────────────
+
+@cli.group()
+def recycle():
+    """回收站操作"""
+
+@recycle.command("ls")
+@click.option("--limit", "-l", default=40, help="显示条数")
+@click.option("--page", "-p", default=1, help="页码")
+@pass_ctx
+def recycle_ls(ctx, limit, page):
+    """列出回收站文件"""
+    ctx.ensure_cookie()
+    result = file_api.list_recycle_bin(ctx.client, limit=limit, offset=(page - 1) * limit)
+
+    if ctx.json_output:
+        click.echo(json.dumps({
+            "count": result["count"],
+            "items": [{
+                "rid": i.rid, "file_name": i.file_name,
+                "file_size": i.file_size, "is_dir": i.is_dir,
+                "cid": i.cid, "parent_name": i.parent_name,
+            } for i in result["items"]],
+        }, ensure_ascii=False))
+        return
+
+    click.echo(f"🗑️ 回收站共 {result['count']} 项:")
+    for i in result["items"]:
+        icon = "📁" if i.is_dir else "📄"
+        click.echo(f"  {icon} {i.file_name}  ({_fmt_size(i.file_size)})  <- {i.parent_name}  [rid:{i.rid}]")
+
+@recycle.command("restore")
+@click.argument("rids", nargs=-1, required=True)
+@pass_ctx
+def recycle_restore(ctx, rids):
+    """从回收站还原文件（支持多个 rid）"""
+    ctx.ensure_cookie()
+    result = file_api.restore_recycle_bin_items(ctx.client, list(rids))
+    click.secho(f"✓ 已还原 {len(result['restored'])} 项", fg="green")
+
+@recycle.command("clear")
+@click.option("--yes", "-y", is_flag=True, help="直接确认")
+@pass_ctx
+def recycle_clear(ctx, yes):
+    """清空回收站"""
+    if not yes:
+        click.confirm("确认清空回收站? 此操作不可恢复!", abort=True)
+    ctx.ensure_cookie()
+    file_api.empty_recycle_bin(ctx.client)
+    click.secho("✓ 回收站已清空", fg="green")
+
+
 # ── 辅助函数 ──────────────────────────────
 
 def _fmt_size(size: int) -> str:

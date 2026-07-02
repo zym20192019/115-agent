@@ -210,6 +210,50 @@ def create_server():
         except Exception as e:
             return f"❌ 搜索失败: {e}"
 
+    @mcp.tool()
+    def recycle_bin_list(limit: int = 40) -> str:
+        """🗑️ 列出回收站文件
+
+        Args:
+            limit: 返回条数上限
+        """
+        try:
+            client = _ensure_client()
+            result = file_api.list_recycle_bin(client, limit=limit)
+            if not result["items"]:
+                return "🗑️ 回收站为空"
+            lines = [f"🗑️ 回收站共 {result['count']} 项:"]
+            for i in result["items"]:
+                icon = "📁" if i.is_dir else "📄"
+                lines.append(f"  {icon} {i.file_name}  ({_fmt_size(i.file_size)})  <- {i.parent_name}  [rid:{i.rid}]")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 查询回收站失败: {e}"
+
+    @mcp.tool()
+    def recycle_bin_restore(rids: list[str]) -> str:
+        """♻️ 从回收站还原文件
+
+        Args:
+            rids: 回收站记录 ID 列表（可多个）
+        """
+        try:
+            client = _ensure_client()
+            result = file_api.restore_recycle_bin_items(client, rids)
+            return f"✅ 已还原 {len(result['restored'])} 项"
+        except Exception as e:
+            return f"❌ 还原失败: {e}"
+
+    @mcp.tool()
+    def recycle_bin_empty() -> str:
+        """🗑️ 清空回收站（不可恢复）"""
+        try:
+            client = _ensure_client()
+            file_api.empty_recycle_bin(client)
+            return "✅ 回收站已清空"
+        except Exception as e:
+            return f"❌ 清空回收站失败: {e}"
+
     return mcp
 
 

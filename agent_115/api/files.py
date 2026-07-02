@@ -6,7 +6,7 @@ from typing import Any, List, Optional
 
 from ..client import Client
 from ..exceptions import APIError, ValidationError
-from ..models import FileEntry
+from ..models import FileEntry, RecycleBinItem
 
 log = logging.getLogger("115-agent.files")
 
@@ -335,26 +335,69 @@ def get_file_download_info(client: Client, pick_code: str) -> dict:
     return data
 
 
-def list_recycle_bin(client: Client, *, limit: int = 200) -> List[FileEntry]:
+def list_recycle_bin(client: Client, *, limit: int = 40, offset: int = 0) -> dict:
     """列出回收站文件
+
+    请求: GET /rb?aid=7&cid=0&offset={offset}&limit={limit}&format=json
 
     Args:
         client: API 客户端
-        limit: 返回上限
+        limit: 每页条数
+        offset: 分页偏移
+
+    Returns:
+        {count: int, items: [RecycleBinItem]}
     """
-    body = client.get("/rb/list", params={"limit": limit, "offset": "0", "format": "json"})
-    entries = body.get("data", []) if isinstance(body.get("data"), list) else []
+    body = client.get("/rb", params={
+        "aid": "7", "cid": "0",
+        "offset": str(offset), "limit": str(limit),
+        "format": "json",
+    }, timeout=30)
+    data = body.get("data", []) if isinstance(body.get("data"), list) else []
+    count = int(body.get("count", 0) or 0)
     results = []
-    for item in entries:
+    for item in data:
         if not isinstance(item, dict):
             continue
-        results.append(FileEntry(
-            id=str(item.get("fid", "")),
-            name=str(item.get("n", "")),
-            is_dir=bool(item.get("cid")),
-            size=int(item.get("s", 0) or 0),
+        results.append(RecycleBinItem(
+            rid=str(item.get("id", "")),
+            file_name=str(item.get("file_name", "")),
+            file_size=int(item.get("file_size", 0) or 0),
+            is_dir=str(item.get("type", "1")) == "2",
+            cid=str(item.get("cid", "")),
+            parent_name=str(item.get("parent_name", "")),
+            deleted_at=str(item.get("dtime", "")),
         ))
-    return results
+    return {"count": count, "items": results}
+
+
+def restore_recycle_bin_items(client: Client, rid_list: list[str]) -> dict:
+    """从回收站还原文件
+
+    请求: POST /rb/revert
+    参数: rid[0]={id}&rid[1]={id}
+
+    Args:
+        client: API 客户端
+        rid_list: 回收站记录 ID 列表
+
+    Returns:
+        {restored: [rid列表]}
+    """
+    if not rid_list:
+        raise ValidationError("rid_list 不能为空")
+
+    data = {}
+    for i, rid in enumerate(rid_list):
+        data[f"rid[{i}]"] = rid
+
+    body = client.form_post("/rb/revert", data=data, timeout=60)
+    if not body.get("state"):
+        raise APIError(
+            body.get("error", "还原失败"),
+            response=body,
+        )
+    return {"restored": rid_list}
 
 
 def empty_recycle_bin(client: Client) -> dict:
