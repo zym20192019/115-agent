@@ -255,6 +255,70 @@ def search_files_by_name(client: Client, cid: str, keyword: str, *,
     return [e for e in all_entries if kw_lower in e.name.lower()]
 
 
+def search_files_global(
+    client: Client,
+    keyword: str,
+    *,
+    cid: str = "0",
+    limit: int = 30,
+    offset: int = 0,
+) -> dict:
+    """全局搜索文件（服务端搜索）
+
+    请求: GET /files/search
+    参数: search_value={keyword}&cid={cid}&offset={offset}&limit={limit}
+
+    Args:
+        client: API 客户端
+        keyword: 搜索关键词
+        cid: 搜索范围目录 CID，0 为全部
+        limit: 每页条数
+        offset: 分页偏移
+
+    Returns:
+        {count: int, entries: [FileEntry], page_count: int}
+    """
+    if not keyword:
+        raise ValidationError("搜索关键词不能为空")
+
+    params = {
+        "offset": str(offset),
+        "limit": str(limit),
+        "search_value": keyword,
+        "aid": "1",
+        "cid": cid,
+        "count_folders": "1",
+        "format": "json",
+    }
+    body = client.get("/files/search", params=params, timeout=30)
+    data = body.get("data", []) if isinstance(body.get("data"), list) else []
+    count = int(body.get("count", 0) or 0)
+    page_count = int(body.get("page_count", 0) or 0)
+
+    entries = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("fid") or item.get("id") or "")
+        is_dir = bool(item.get("cid")) or item.get("is_dir", False)
+        name = str(item.get("n") or item.get("name") or "").strip()
+        if not name:
+            continue
+        entries.append(FileEntry(
+            id=fid or str(item.get("cid", "")),
+            name=name,
+            is_dir=is_dir,
+            cid=str(item.get("cid", "")),
+            size=int(item.get("s", 0) or 0),
+            pick_code=str(item.get("pc", "") or "").strip(),
+            sha1=str(item.get("sha", "") or "").upper(),
+            updated_at=str(item.get("te", "") or ""),
+            created_at=str(item.get("tp", "") or ""),
+        ))
+
+    return {"count": count, "entries": entries, "page_count": page_count}
+
+
 def get_file_download_info(client: Client, pick_code: str) -> dict:
     """通过 pick_code 获取文件下载信息
 

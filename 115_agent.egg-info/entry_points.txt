@@ -1,0 +1,2 @@
+[console_scripts]
+115 = cli.main:cli

@@ -164,6 +164,35 @@ def rm(ctx, path, yes):
     click.secho(f"✓ 已删除 {len(entries)} 项", fg="green")
 
 
+# ── search ──────────────────────────────
+
+@cli.command()
+@click.argument("keyword")
+@click.option("--limit", "-l", default=30, help="显示条数")
+@click.option("--page", "-p", default=1, help="页码")
+@pass_ctx
+def search(ctx, keyword, limit, page):
+    """全局搜索文件"""
+    ctx.ensure_cookie()
+    result = file_api.search_files_global(ctx.client, keyword, limit=limit, offset=(page - 1) * limit)
+
+    if ctx.json_output:
+        click.echo(json.dumps({
+            "count": result["count"],
+            "entries": [e.__dict__ for e in result["entries"]],
+        }, ensure_ascii=False))
+        return
+
+    click.echo(f"🔍 搜索「{keyword}」共 {result['count']} 条结果:")
+    for e in result["entries"]:
+        icon = "📁" if e.is_dir else "📄"
+        size_str = f" {_fmt_size(e.size)}" if not e.is_dir else ""
+        click.echo(f"  {icon} {e.name}{size_str}")
+
+    if result["page_count"] > page:
+        click.echo(f"  共 {result['page_count']} 页，使用 -p {page + 1} 查看下一页")
+
+
 # ── mv ──────────────────────────────
 
 @cli.command()

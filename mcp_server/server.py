@@ -188,6 +188,28 @@ def create_server():
         except Exception as e:
             return f"❌ 导出目录树失败: {e}"
 
+    @mcp.tool()
+    def search_files(keyword: str, limit: int = 30) -> str:
+        """🔍 全局搜索 115 网盘中的文件
+
+        Args:
+            keyword: 搜索关键词
+            limit: 返回条数上限
+        """
+        try:
+            client = _ensure_client()
+            result = file_api.search_files_global(client, keyword, limit=limit)
+            if not result["entries"]:
+                return f"🔍 搜索「{keyword}」: 无结果"
+            lines = [f"🔍 搜索「{keyword}」共 {result['count']} 条:"]
+            for e in result["entries"]:
+                icon = "📁" if e.is_dir else "📄"
+                size_str = f" {_fmt_size(e.size)}" if not e.is_dir else ""
+                lines.append(f"  {icon} {e.name}{size_str}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 搜索失败: {e}"
+
     return mcp
 
 
