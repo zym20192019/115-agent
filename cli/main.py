@@ -164,6 +164,27 @@ def rm(ctx, path, yes):
     click.secho(f"✓ 已删除 {len(entries)} 项", fg="green")
 
 
+# ── mv ──────────────────────────────
+
+@cli.command()
+@click.argument("path")
+@click.argument("target")
+@pass_ctx
+def mv(ctx, path, target):
+    """移动文件/目录到目标目录"""
+    ctx.ensure_cookie()
+    parent, name = _split_path(path)
+    cid = file_api.resolve_path_to_cid(ctx.client, parent) if parent else "0"
+    entries = file_api.search_files_by_name(ctx.client, cid, name)
+    if not entries:
+        raise click.UsageError(f"未找到: {path}")
+
+    target_cid = file_api.resolve_path_to_cid(ctx.client, target)
+    ids = [e.id for e in entries]
+    file_api.move_entries(ctx.client, ids, target_cid)
+    click.secho(f"✓ 已移动 {len(ids)} 项到 {target}", fg="green")
+
+
 # ── share-receive ──────────────────────────────
 
 @cli.command("share-receive")

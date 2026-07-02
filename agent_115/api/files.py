@@ -297,3 +297,43 @@ def empty_recycle_bin(client: Client) -> dict:
     """清空回收站"""
     body = client.form_post("/rb/delete/all", data={"format": "json"})
     return {"ok": bool(body.get("state"))}
+
+
+def move_entries(
+    client: Client,
+    entry_ids: list[str],
+    target_cid: str,
+) -> dict:
+    """移动文件/目录到目标目录
+
+    请求: POST /files/move
+    参数: pid={target_cid}&fid[0]={id1}&fid[1]={id2}&move_proid={timestamp}
+
+    Args:
+        client: API 客户端
+        entry_ids: 要移动的文件/目录 ID 列表
+        target_cid: 目标目录 CID
+
+    Returns:
+        {moved: [id列表]}
+    """
+    if not entry_ids:
+        raise ValidationError("entry_ids 不能为空")
+    if not target_cid:
+        raise ValidationError("target_cid 不能为空")
+
+    import time
+    data: dict[str, str] = {
+        "pid": target_cid,
+        "move_proid": f"{int(time.time() * 1000)}_{entry_ids[0]}",
+    }
+    for i, eid in enumerate(entry_ids):
+        data[f"fid[{i}]"] = eid
+
+    body = client.form_post("/files/move", data=data, timeout=60)
+    if not body.get("state"):
+        raise APIError(
+            body.get("error", "移动失败"),
+            response=body,
+        )
+    return {"moved": entry_ids}

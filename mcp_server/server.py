@@ -103,6 +103,22 @@ def create_server():
             return f"❌ 删除失败: {e}"
 
     @mcp.tool()
+    def move_files(file_ids: list[str], target_path: str) -> str:
+        """📦 移动文件/目录到目标目录
+
+        Args:
+            file_ids: 要移动的文件/目录 ID 列表
+            target_path: 目标目录路径，如 /影视/电影
+        """
+        try:
+            client = _ensure_client()
+            cid = file_api.resolve_path_to_cid(client, target_path)
+            result = file_api.move_entries(client, file_ids, cid)
+            return f"✅ 已移动 {len(result['moved'])} 项到 {target_path}"
+        except Exception as e:
+            return f"❌ 移动失败: {e}"
+
+    @mcp.tool()
     def batch_rename(renames: dict) -> str:
         """✏️ 批量重命名文件 {file_id: new_name, ...}
 
