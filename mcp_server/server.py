@@ -10,6 +10,7 @@ from agent_115.exceptions import Agent115Error
 from agent_115.api import files as file_api
 from agent_115.api import share as share_api
 from agent_115.api import directory as dir_api
+from agent_115.api import life as life_api
 
 log = logging.getLogger("115-agent.mcp")
 
@@ -253,6 +254,31 @@ def create_server():
             return "✅ 回收站已清空"
         except Exception as e:
             return f"❌ 清空回收站失败: {e}"
+
+    @mcp.tool()
+    def recent_operations(op_type: int = 0, limit: int = 20) -> str:
+        """📋 查看 115 网盘最近操作记录
+
+        Args:
+            op_type: 操作类型 (0=全部, 1=浏览, 2=移动复制, 3=重命名)
+            limit: 返回条数
+        """
+        try:
+            client = _ensure_client()
+            result = life_api.recent_operations(client, operation_type=op_type, limit=limit)
+            groups = result.get("list", [])
+            if not groups:
+                return "📋 无最近操作"
+            lines = [f"📋 最近操作 ({result.get('count', 0)} 条):"]
+            for group in groups:
+                lines.append(f"\n  [{group.get('date', '')}] {group.get('tab_title', '')}")
+                for item in group.get("items", [])[:5]:
+                    lines.append(f"    📄 {item.get('file_name', '')}")
+                if len(group.get("items", [])) > 5:
+                    lines.append(f"    ... 还有 {len(group['items']) - 5} 项")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 查询失败: {e}"
 
     return mcp
 

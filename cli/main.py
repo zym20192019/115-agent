@@ -13,6 +13,7 @@ from agent_115.exceptions import Agent115Error
 from agent_115.api import files as file_api
 from agent_115.api import share as share_api
 from agent_115.api import directory as dir_api
+from agent_115.api import life as life_api
 
 log = logging.getLogger("115-agent")
 
@@ -296,6 +297,35 @@ def recycle_clear(ctx, yes):
     ctx.ensure_cookie()
     file_api.empty_recycle_bin(ctx.client)
     click.secho("✓ 回收站已清空", fg="green")
+
+
+# ── recent ──────────────────────────────
+
+@cli.command()
+@click.option("--type", "-t", "op_type", default=0, help="操作类型 (0=全部 1=浏览 2=移动复制 3=重命名)")
+@click.option("--limit", "-l", default=20, help="显示条数")
+@pass_ctx
+def recent(ctx, op_type, limit):
+    """查看最近操作记录"""
+    ctx.ensure_cookie()
+    result = life_api.recent_operations(ctx.client, operation_type=op_type, limit=limit)
+    entries = result.get("list", [])
+
+    if ctx.json_output:
+        click.echo(json.dumps(result, ensure_ascii=False))
+        return
+
+    if not entries:
+        click.echo("(无最近操作)")
+        return
+
+    click.echo(f"📋 最近操作 ({result.get('count', 0)} 条):")
+    for group in entries:
+        click.echo(f"\n  [{group.get('date', '')}] {group.get('tab_title', '')} (共 {group['total']} 项)")
+        for item in group.get("items", [])[:5]:  # 最多显示 5 条详情
+            click.echo(f"    📄 {item.get('file_name', '')}")
+        if len(group.get("items", [])) > 5:
+            click.echo(f"    ... 还有 {len(group['items']) - 5} 项")
 
 
 # ── 辅助函数 ──────────────────────────────
