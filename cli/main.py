@@ -185,6 +185,22 @@ def mv(ctx, path, target):
     click.secho(f"✓ 已移动 {len(ids)} 项到 {target}", fg="green")
 
 
+# ── mkdir ──────────────────────────────
+
+@cli.command()
+@click.argument("path")
+@pass_ctx
+def mkdir(ctx, path):
+    """创建新目录"""
+    ctx.ensure_cookie()
+    parent, name = _split_path(path)
+    if not name:
+        raise click.UsageError("路径不能为空")
+    parent_cid = file_api.resolve_path_to_cid(ctx.client, parent) if parent else "0"
+    result = file_api.create_folder(ctx.client, name, parent_cid)
+    click.secho(f"✓ 已创建目录: {result['name']} (cid={result['cid']})", fg="green")
+
+
 # ── share-receive ──────────────────────────────
 
 @cli.command("share-receive")

@@ -299,6 +299,36 @@ def empty_recycle_bin(client: Client) -> dict:
     return {"ok": bool(body.get("state"))}
 
 
+def create_folder(client: Client, name: str, parent_cid: str = "0") -> dict:
+    """创建新目录
+
+    请求: POST /files/add
+    参数: pid={parent_cid}&cname={name}
+
+    Args:
+        client: API 客户端
+        name: 目录名称
+        parent_cid: 父目录 CID，默认根目录
+
+    Returns:
+        {cid: str, name: str, file_id: str}
+    """
+    if not name or not name.strip():
+        raise ValidationError("目录名称不能为空")
+
+    body = client.form_post("/files/add", data={"pid": parent_cid, "cname": name.strip()}, timeout=30)
+    if not body.get("state"):
+        raise APIError(
+            body.get("error", "创建目录失败"),
+            response=body,
+        )
+    return {
+        "cid": str(body.get("cid", "")),
+        "name": str(body.get("cname", name.strip())),
+        "file_id": str(body.get("file_id", "")),
+    }
+
+
 def move_entries(
     client: Client,
     entry_ids: list[str],

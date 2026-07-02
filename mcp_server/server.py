@@ -119,6 +119,24 @@ def create_server():
             return f"❌ 移动失败: {e}"
 
     @mcp.tool()
+    def create_folder(path: str) -> str:
+        """📁 创建新目录
+
+        Args:
+            path: 目录路径，如 /影视/新电影 或 /下载/分类/2024
+        """
+        try:
+            client = _ensure_client()
+            parent, name = path.strip("/").rsplit("/", 1) if "/" in path.strip("/") else ("", path.strip("/"))
+            if not name:
+                return "❌ 路径不能为空"
+            parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
+            result = file_api.create_folder(client, name, parent_cid)
+            return f"✅ 已创建目录: {result['name']}"
+        except Exception as e:
+            return f"❌ 创建目录失败: {e}"
+
+    @mcp.tool()
     def batch_rename(renames: dict) -> str:
         """✏️ 批量重命名文件 {file_id: new_name, ...}
 
