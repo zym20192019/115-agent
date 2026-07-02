@@ -34,8 +34,14 @@ pip install -e .
 | `115 ls [path]` | 列出目录 |
 | `115 tree [path]` | 导出目录树 |
 | `115 rename <path> <new_name>` | 重命名 |
+| `115 mv <path> <target>` | 移动文件/目录 |
+| `115 mkdir <path>` | 新建目录 |
 | `115 rm <path>` | 删除（移入回收站） |
+| `115 search <keyword>` | 全局搜索文件 |
 | `115 share-receive <url>` | 接收分享 |
+| `115 recycle ls` | 列出回收站 |
+| `115 recycle restore <rid>` | 从回收站还原 |
+| `115 recycle clear` | 清空回收站 |
 
 ## MCP Server（AI 调用）
 
@@ -72,11 +78,12 @@ pytest tests/
 
 - [x] 文件列表（分页/按目录）
 - [x] 目录路径解析
+- [x] 新建文件夹
 - [x] 重命名（单个/批量）
-- [x] 删除（回收站）
+- [x] 移动文件/目录
+- [x] 删除（回收站）+ 还原 + 清空
+- [x] 全局搜索文件
 - [x] 目录树导出
 - [x] 分享接收/查看
-- [ ] 文件移动/复制
 - [ ] 文件上传
-- [ ] 创建目录
-- [ ] 搜索文件
+- [ ] 复制文件
