@@ -1,0 +1,23 @@
+[project]
+name = "115-agent"
+version = "0.1.0"
+description = "115 网盘 AI 智能助手 - SDK + CLI + MCP Server"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+cli = ["click>=8.1"]
+mcp = ["mcp>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+115 = "cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent_115*", "cli*", "mcp_server*"]
