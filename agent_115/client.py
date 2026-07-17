@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import threading
 import time
 from http.cookies import SimpleCookie
 from typing import Any, Optional
@@ -28,6 +30,42 @@ BASE_HEADERS = {
 API_BASE = "https://webapi.115.com"
 APP_BASE = "https://proapi.115.com"
 APP_VER = "3.0.9.5"
+
+
+class GlobalRateLimiter:
+    """Process-wide serialized rate limiter shared by every Client instance."""
+
+    def __init__(self, qps: float = 1.0):
+        self._lock = threading.Lock()
+        self._config_lock = threading.Lock()
+        self._next_allowed = 0.0
+        self.set_qps(qps)
+
+    @property
+    def qps(self) -> float:
+        return self._qps
+
+    def set_qps(self, qps: float) -> None:
+        qps = float(qps)
+        if qps <= 0:
+            raise ValueError("qps must be greater than zero")
+        with self._config_lock:
+            self._qps = qps
+
+    def __enter__(self):
+        self._lock.acquire()
+        interval = 1.0 / self.qps
+        delay = self._next_allowed - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        self._next_allowed = time.monotonic() + interval
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._lock.release()
+
+
+GLOBAL_RATE_LIMITER = GlobalRateLimiter(float(os.getenv("115_AGENT_QPS", "1")))
 
 
 class Client:
@@ -95,16 +133,17 @@ class Client:
         """发送 HTTP 请求并解析 JSON 响应"""
         self._check_auth()
         try:
-            resp = self._session.request(
-                method=method,
-                url=url,
-                params=params,
-                data=data,
-                json=json_data,
-                files=files,
-                headers=headers,
-                timeout=timeout,
-            )
+            with GLOBAL_RATE_LIMITER:
+                resp = self._session.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    data=data,
+                    json=json_data,
+                    files=files,
+                    headers=headers,
+                    timeout=timeout,
+                )
             resp.raise_for_status()
         except requests.Timeout:
             raise NetworkError(f"请求超时: {url}")

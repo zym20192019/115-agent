@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import time
@@ -10,6 +11,8 @@ from threading import RLock
 from typing import Optional
 
 from fastapi import HTTPException, Request, Response
+
+from agent_115.client import GLOBAL_RATE_LIMITER
 
 
 @dataclass
@@ -24,8 +27,31 @@ class AuthStore:
         password = os.getenv("WEB_ADMIN_PASSWORD", "change-me")
         self.users = {username: WebUser(username, self._hash(password))}
         self.sessions: dict[str, str] = {}
+        # Seed the per-session setting from the service environment so the
+        # existing PAN115_COOKIE remains usable after WebUI restarts.
         self.cookies: dict[str, str] = {}
+        self.default_cookie = os.getenv("PAN115_COOKIE", "").strip()
+        self.settings_path = os.getenv("WEBUI_SETTINGS_PATH", "/opt/115-agent/.webui-settings.json")
+        self._load_rate_limit()
         self.lock = RLock()
+
+    def _load_rate_limit(self) -> None:
+        try:
+            with open(self.settings_path, encoding="utf-8") as handle:
+                qps = json.load(handle).get("qps")
+            if qps is not None:
+                GLOBAL_RATE_LIMITER.set_qps(qps)
+        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+    def get_qps(self) -> float:
+        return GLOBAL_RATE_LIMITER.qps
+
+    def set_qps(self, qps: float) -> float:
+        GLOBAL_RATE_LIMITER.set_qps(qps)
+        with open(self.settings_path, "w", encoding="utf-8") as handle:
+            json.dump({"qps": GLOBAL_RATE_LIMITER.qps}, handle)
+        return GLOBAL_RATE_LIMITER.qps
 
     @staticmethod
     def _hash(password: str, salt: bytes | None = None) -> str:
@@ -63,7 +89,7 @@ class AuthStore:
 
     def get_cookie(self, token: str) -> str:
         with self.lock:
-            return self.cookies.get(token, "")
+            return self.cookies.get(token, "") or self.default_cookie
 
 
 auth_store = AuthStore()
