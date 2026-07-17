@@ -1,9 +1,13 @@
-"""115 官方目录树导出 API"""
+"""115 官方目录树导出 API
+
+💡 目录树使用提示：当文件/文件夹特别多或层级很深时，
+   优先用 export_tree 获取目录树再本地解析，可避免大量串行列目录请求。
+   但目录树仅用于确认候选和父目录，实际文件 ID 仍需通过 SDK 获取。
+"""
 
 import json
 import logging
 import urllib.parse
-import urllib.request
 import time
 from http.cookies import SimpleCookie
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -94,21 +98,20 @@ def _collect_download_urls(payload: Any) -> List[str]:
 def _resolve_download_payload(client: Client, pick_code: str) -> Tuple[List[str], str]:
     """Resolve a pickcode through the current webapi download endpoint."""
     url = "https://webapi.115.com/files/download?pickcode=" + urllib.parse.quote(pick_code)
-    request = urllib.request.Request(
+    response = client.request_raw(
+        "GET",
         url,
         headers={
-            "Cookie": client.get_cookie_str(),
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://115.com/",
             "Origin": "https://115.com",
             "User-Agent": "Mozilla/5.0 115-agent",
         },
-        method="GET",
+        timeout=45,
     )
-    with urllib.request.urlopen(request, timeout=45) as response:
-        body = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="ignore")
-        payload = json.loads(body)
-        response_cookies = response.headers.get_all("Set-Cookie") or []
+    body = response.content.decode(response.encoding or "utf-8", errors="ignore")
+    payload = json.loads(body)
+    response_cookies = [response.headers.get("Set-Cookie", "")] if response.headers.get("Set-Cookie") else []
 
     if not payload.get("state", False):
         raise APIError(payload.get("error") or payload.get("message") or "115 下载地址解析失败", response=payload)
@@ -140,9 +143,8 @@ def _download_tree_bytes(client: Client, urls: List[str], download_cookie: str =
         encoded_path = urllib.parse.quote(urllib.parse.unquote(parts.path), safe="/%:@+")
         target = urllib.parse.urlunsplit((parts.scheme, parts.netloc, encoded_path, parts.query, parts.fragment))
         try:
-            request = urllib.request.Request(target, headers=headers, method="GET")
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return response.read()
+            response = client.request_raw("GET", target, headers=headers, timeout=60)
+            return response.content
         except Exception as exc:
             last_error = exc
     raise APIError(f"目录树文件下载失败: {last_error}") from last_error

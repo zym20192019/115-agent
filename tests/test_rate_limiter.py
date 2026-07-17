@@ -5,7 +5,7 @@ from agent_115.client import GlobalRateLimiter
 
 
 def test_limiter_serializes_requests_and_enforces_interval():
-    limiter = GlobalRateLimiter(qps=20)
+    limiter = GlobalRateLimiter(qps=0.5)
     active = 0
     maximum = 0
     starts = []
@@ -30,8 +30,8 @@ def test_limiter_serializes_requests_and_enforces_interval():
 
     assert maximum == 1
     assert len(starts) == 3
-    assert starts[1] - starts[0] >= 0.045
-    assert starts[2] - starts[1] >= 0.045
+    assert starts[1] - starts[0] >= 1.95
+    assert starts[2] - starts[1] >= 1.95
 
 
 def test_limiter_can_update_qps():

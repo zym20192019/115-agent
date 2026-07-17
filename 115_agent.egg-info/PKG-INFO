@@ -8,5 +8,9 @@ Provides-Extra: cli
 Requires-Dist: click>=8.1; extra == "cli"
 Provides-Extra: mcp
 Requires-Dist: mcp>=1.0; extra == "mcp"
+Provides-Extra: web
+Requires-Dist: fastapi>=0.115; extra == "web"
+Requires-Dist: uvicorn[standard]>=0.30; extra == "web"
+Requires-Dist: pydantic>=2.0; extra == "web"
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"

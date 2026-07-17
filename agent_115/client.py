@@ -1,6 +1,7 @@
 """115 API 客户端 — cookie 管理 + HTTP 请求"""
 
 import json
+import fcntl
 import logging
 import os
 import threading
@@ -14,6 +15,11 @@ import requests
 from .exceptions import APIError, AuthError, NetworkError, ValidationError
 
 log = logging.getLogger("115-agent")
+
+
+def _log_request(method: str, url: str, started: float, status: object = "error") -> None:
+    elapsed_ms = (time.monotonic() - started) * 1000
+    log.info("115 API request method=%s url=%s status=%s elapsed_ms=%.0f", method, url, status, elapsed_ms)
 
 # 默认请求头
 BASE_HEADERS = {
@@ -32,13 +38,40 @@ APP_BASE = "https://proapi.115.com"
 APP_VER = "3.0.9.5"
 
 
+SETTINGS_PATH = "/opt/115-agent/.webui-settings.json"
+RATE_LOCK_PATH = "/opt/115-agent/.115-api-rate.lock"
+ENV_PATH = "/opt/115-agent/.env"
+
+
+def load_qps() -> float:
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as handle:
+            qps = float(json.load(handle)["qps"])
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        qps = 0.5
+    if qps <= 0:
+        raise ValueError("qps must be greater than zero")
+    return qps
+
+
+def load_cookie() -> str:
+    try:
+        with open(ENV_PATH, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("PAN115_COOKIE="):
+                    return line.rstrip("\n").split("=", 1)[1]
+    except OSError:
+        pass
+    return ""
+
+
 class GlobalRateLimiter:
-    """Process-wide serialized rate limiter shared by every Client instance."""
+    """Cross-process serialized limiter shared by every 115 API client."""
 
     def __init__(self, qps: float = 1.0):
         self._lock = threading.Lock()
         self._config_lock = threading.Lock()
-        self._next_allowed = 0.0
+        self._qps = qps
         self.set_qps(qps)
 
     @property
@@ -54,18 +87,30 @@ class GlobalRateLimiter:
 
     def __enter__(self):
         self._lock.acquire()
-        interval = 1.0 / self.qps
-        delay = self._next_allowed - time.monotonic()
+        self._rate_file = open(RATE_LOCK_PATH, "a+", encoding="ascii")
+        fcntl.flock(self._rate_file, fcntl.LOCK_EX)
+        qps = load_qps()
+        interval = 1.0 / qps
+        self.set_qps(qps)
+        self._rate_file.seek(0)
+        raw = self._rate_file.read().strip()
+        next_allowed = float(raw) if raw else 0.0
+        delay = next_allowed - time.monotonic()
         if delay > 0:
             time.sleep(delay)
-        self._next_allowed = time.monotonic() + interval
+        self._rate_file.seek(0)
+        self._rate_file.truncate()
+        self._rate_file.write(f"{time.monotonic() + interval:.9f}")
+        self._rate_file.flush()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        fcntl.flock(self._rate_file, fcntl.LOCK_UN)
+        self._rate_file.close()
         self._lock.release()
 
 
-GLOBAL_RATE_LIMITER = GlobalRateLimiter(float(os.getenv("115_AGENT_QPS", "1")))
+GLOBAL_RATE_LIMITER = GlobalRateLimiter(load_qps())
 
 
 class Client:
@@ -90,7 +135,6 @@ class Client:
         cookie.load(raw)
         for key, morsel in cookie.items():
             self._session.cookies.set(key, morsel.value)
-        log.info("Cookie 已设置")
 
     def get_cookie_str(self) -> str:
         """获取当前 cookie 字符串"""
@@ -132,6 +176,7 @@ class Client:
     ) -> Any:
         """发送 HTTP 请求并解析 JSON 响应"""
         self._check_auth()
+        started = time.monotonic()
         try:
             with GLOBAL_RATE_LIMITER:
                 resp = self._session.request(
@@ -145,9 +190,13 @@ class Client:
                     timeout=timeout,
                 )
             resp.raise_for_status()
+            _log_request(method, resp.url, started, resp.status_code)
         except requests.Timeout:
+            _log_request(method, url, started, "timeout")
             raise NetworkError(f"请求超时: {url}")
         except requests.RequestException as e:
+            status = getattr(getattr(e, "response", None), "status_code", "network_error")
+            _log_request(method, url, started, status)
             raise NetworkError(f"请求失败: {e}")
 
         try:
@@ -165,6 +214,33 @@ class Client:
                 response=body,
             )
         return body
+
+    def request_raw(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        timeout: int = 30,
+    ) -> requests.Response:
+        """Return a raw response through the authenticated, rate-limited outlet."""
+        self._check_auth()
+        started = time.monotonic()
+        try:
+            with GLOBAL_RATE_LIMITER:
+                response = self._session.request(
+                    method=method, url=url, headers=headers, timeout=timeout
+                )
+            response.raise_for_status()
+            _log_request(method, response.url, started, response.status_code)
+            return response
+        except requests.Timeout as exc:
+            _log_request(method, url, started, "timeout")
+            raise NetworkError(f"请求超时: {url}") from exc
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", "network_error")
+            _log_request(method, url, started, status)
+            raise NetworkError(f"请求失败: {exc}") from exc
 
     def get(self, path: str, *, params: Optional[dict] = None, **kw) -> Any:
         return self.request("GET", f"{API_BASE}{path}", params=params, **kw)

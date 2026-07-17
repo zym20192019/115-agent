@@ -46,11 +46,8 @@ def me(request: Request):
 
 @router.put("/settings/115-cookie")
 def set_115_cookie(body: CookieBody, request: Request):
-    _, token = require_user(request)
-    if not body.cookie.strip():
-        return Response(content='{"detail":"Cookie 不能为空"}', status_code=422, media_type="application/json")
-    auth_store.set_cookie(token, body.cookie)
-    return {"configured": True}
+    require_user(request)
+    raise HTTPException(409, "Cookie 只从 /opt/115-agent/.env 的 PAN115_COOKIE 读取")
 
 
 @router.get("/settings/115-cookie/status")

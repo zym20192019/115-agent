@@ -12,10 +12,15 @@ agent_115/exceptions.py
 agent_115/models.py
 agent_115/api/__init__.py
 agent_115/api/directory.py
+agent_115/api/extract.py
 agent_115/api/files.py
+agent_115/api/life.py
 agent_115/api/share.py
 agent_115/ops/__init__.py
+agent_115/ops/unzip.py
 cli/__init__.py
 cli/main.py
 mcp_server/__init__.py
 mcp_server/server.py
+tests/test_directory_tree.py
+tests/test_rate_limiter.py

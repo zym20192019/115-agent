@@ -30,7 +30,8 @@ class AuthStore:
         # Seed the per-session setting from the service environment so the
         # existing PAN115_COOKIE remains usable after WebUI restarts.
         self.cookies: dict[str, str] = {}
-        self.default_cookie = os.getenv("PAN115_COOKIE", "").strip()
+        from agent_115.client import load_cookie
+        self.default_cookie = load_cookie()
         self.settings_path = os.getenv("WEBUI_SETTINGS_PATH", "/opt/115-agent/.webui-settings.json")
         self._load_rate_limit()
         self.lock = RLock()
@@ -48,7 +49,9 @@ class AuthStore:
         return GLOBAL_RATE_LIMITER.qps
 
     def set_qps(self, qps: float) -> float:
-        GLOBAL_RATE_LIMITER.set_qps(qps)
+        if float(qps) != 0.5:
+            raise ValueError("qps is fixed at 0.5")
+        GLOBAL_RATE_LIMITER.set_qps(0.5)
         with open(self.settings_path, "w", encoding="utf-8") as handle:
             json.dump({"qps": GLOBAL_RATE_LIMITER.qps}, handle)
         return GLOBAL_RATE_LIMITER.qps

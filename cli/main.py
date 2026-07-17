@@ -8,7 +8,7 @@ from typing import Optional
 
 import click
 
-from agent_115.client import Client
+from agent_115.client import Client, load_cookie
 from agent_115.exceptions import Agent115Error
 from agent_115.api import files as file_api
 from agent_115.api import share as share_api
@@ -29,7 +29,7 @@ class Context:
     def ensure_cookie(self):
         if self._cookie_loaded:
             return
-        cookie = os.environ.get("PAN115_COOKIE", "")
+        cookie = load_cookie()
         if cookie:
             self.client.set_cookie(cookie)
             self._cookie_loaded = True
@@ -45,15 +45,12 @@ pass_ctx = click.make_pass_decorator(Context, ensure=True)
 # ── CLI 主入口 ──────────────────────────────
 
 @click.group()
-@click.option("--cookie", "-c", envvar="PAN115_COOKIE", default="", help="115 Cookie")
 @click.option("--json", "json_output", is_flag=True, help="JSON 格式输出")
 @click.pass_context
-def cli(ctx, cookie, json_output):
+def cli(ctx, json_output):
     """115-agent: 115 网盘命令行工具"""
     ctx.obj = Context()
     ctx.obj.json_output = json_output
-    if cookie:
-        ctx.obj.client.set_cookie(cookie)
 
 
 # ── login ──────────────────────────────

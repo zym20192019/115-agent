@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any, Optional
 
-from agent_115.client import Client
+from agent_115.client import Client, load_cookie
 from agent_115.exceptions import Agent115Error
 from agent_115.api import files as file_api
 from agent_115.api import share as share_api
@@ -33,17 +33,7 @@ def create_server():
         nonlocal _client
         if _client is not None:
             return _client
-        cookie = os.environ.get("PAN115_COOKIE", "")
-        if not cookie:
-            # 尝试从 .env 读取
-            try:
-                with open(".env") as f:
-                    for line in f:
-                        if line.startswith("PAN115_COOKIE="):
-                            cookie = line.strip().split("=", 1)[1]
-                            break
-            except (FileNotFoundError, IndexError):
-                pass
+        cookie = load_cookie()
         if not cookie:
             raise RuntimeError("未设置 PAN115_COOKIE 环境变量")
         _client = Client(cookie)
