@@ -1,7 +1,7 @@
 """115 API 数据模型"""
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 
 @dataclass
@@ -38,3 +38,26 @@ class RecycleBinItem:
     cid: str = ""       # 原所在目录 CID
     parent_name: str = ""  # 原所在目录名称
     deleted_at: str = ""  # 删除时间
+
+
+@dataclass
+class ExtractListItem:
+    """压缩包内条目"""
+    file_name: str
+    file_category: int  # 0=目录 1=文件
+
+
+@dataclass
+class UnzipResult:
+    """单次云解压结果"""
+    archive_name: str
+    pick_code: str
+    mode: str  # each | direct
+    status: str  # success|failed|incomplete|damaged|password_required|timeout|skipped
+    extract_id: str = ""
+    target_cid: str = ""
+    archive_size: int = 0
+    extracted_size: int = 0
+    zip_deleted: bool = False
+    message: str = ""
+    created_ids: List[str] = field(default_factory=list)

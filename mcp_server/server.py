@@ -11,6 +11,7 @@ from agent_115.api import files as file_api
 from agent_115.api import share as share_api
 from agent_115.api import directory as dir_api
 from agent_115.api import life as life_api
+from agent_115.ops import unzip as unzip_ops
 
 log = logging.getLogger("115-agent.mcp")
 
@@ -279,6 +280,141 @@ def create_server():
             return "\n".join(lines)
         except Exception as e:
             return f"❌ 查询失败: {e}"
+
+    @mcp.tool()
+    def unzip_file(
+        path: str,
+        mode: str = "each",
+        password: str = "",
+        delete_zip: bool = False,
+        skip_pre: bool = False,
+    ) -> str:
+        """📦 云解压单个压缩包
+
+        Args:
+            path: 压缩包路径，如 /下载/movie.zip
+            mode: each=分别解压到同名文件夹, direct=直接解压到所在目录
+            password: 解压密码（可选）
+            delete_zip: 仅当解压结果体积 >= 原包时才删除压缩包（默认 False）
+            skip_pre: 跳过预解压
+        """
+        try:
+            client = _ensure_client()
+            mode = "direct" if mode == "direct" else "each"
+            parent, name = path.strip("/").rsplit("/", 1) if "/" in path.strip("/") else ("", path.strip("/"))
+            parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
+            entries = file_api.search_files_by_name(client, parent_cid, name)
+            files = [e for e in entries if not e.is_dir and e.name == name]
+            if not files:
+                files = [e for e in entries if not e.is_dir]
+            if not files:
+                return f"❌ 未找到: {path}"
+            e = files[0]
+            if not e.pick_code:
+                return f"❌ 缺少 pick_code: {e.name}"
+            r = unzip_ops.unzip_one(
+                client,
+                pick_code=e.pick_code,
+                file_id=e.id,
+                file_name=e.name,
+                parent_cid=parent_cid,
+                archive_size=int(e.size or 0),
+                mode=mode,
+                secret=password or None,
+                delete_zip=delete_zip,
+                skip_pre_extract=skip_pre,
+            )
+            icon = "✅" if r.status == "success" else ("⚠️" if r.status in ("incomplete", "password_required") else "❌")
+            return (
+                f"{icon} {r.archive_name} [{r.status}] mode={r.mode} "
+                f"size={_fmt_size(r.extracted_size)}/{_fmt_size(r.archive_size)} "
+                f"{'(已删包)' if r.zip_deleted else ''}\n{r.message}"
+            )
+        except Exception as e:
+            return f"❌ 解压失败: {e}"
+
+    @mcp.tool()
+    def unzip_batch(
+        dir_path: str,
+        mode: str = "each",
+        password: str = "",
+        delete_zip: bool = False,
+        skip_pre: bool = False,
+    ) -> str:
+        """📦 批量云解压目录内压缩包（串行）
+
+        Args:
+            dir_path: 目录路径
+            mode: each 或 direct
+            password: 解压密码（可选）
+            delete_zip: 体积合格时删除原压缩包
+            skip_pre: 跳过预解压
+        """
+        try:
+            client = _ensure_client()
+            mode = "direct" if mode == "direct" else "each"
+            cid = file_api.resolve_path_to_cid(client, dir_path) if dir_path not in ("/", "") else "0"
+            archives = unzip_ops.collect_archives_in_dir(client, cid)
+            if not archives:
+                return f"📦 {dir_path}: 无压缩包"
+            results = unzip_ops.unzip_batch(
+                client,
+                archives,
+                parent_cid=cid,
+                mode=mode,
+                secret=password or None,
+                delete_zip=delete_zip,
+                skip_pre_extract=skip_pre,
+            )
+            lines = [f"📦 批量解压 {dir_path} 共 {len(results)} 项:"]
+            for r in results:
+                icon = "✅" if r.status == "success" else "⚠️" if r.status in ("incomplete", "skipped", "password_required") else "❌"
+                lines.append(f"  {icon} {r.archive_name} [{r.status}] {r.message}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 批量解压失败: {e}"
+
+    @mcp.tool()
+    def unzip_pre(path: str, password: str = "") -> str:
+        """🔧 预解压（索引）压缩包或目录内压缩包
+
+        Args:
+            path: 文件或目录路径
+            password: 解压密码（可选）
+        """
+        try:
+            client = _ensure_client()
+            # 尝试目录
+            try:
+                cid = file_api.resolve_path_to_cid(client, path) if path not in ("/", "") else "0"
+                archives = unzip_ops.collect_archives_in_dir(client, cid)
+            except Exception:
+                archives = []
+                cid = None
+
+            if not archives:
+                parent, name = path.strip("/").rsplit("/", 1) if "/" in path.strip("/") else ("", path.strip("/"))
+                parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
+                entries = file_api.search_files_by_name(client, parent_cid, name)
+                archives = [e for e in entries if not e.is_dir and e.pick_code]
+
+            if not archives:
+                return f"❌ 未找到压缩包: {path}"
+
+            lines = [f"🔧 预解压 {len(archives)} 项:"]
+            for e in archives:
+                pre = unzip_ops.ensure_pre_extract(
+                    client,
+                    e.pick_code,
+                    secret=password or None,
+                    file_id=e.id,
+                    file_name=e.name,
+                )
+                extra = f" -> {pre['renamed_to']}" if pre.get("renamed_to") else ""
+                lines.append(f"  {e.name}: {pre.get('status')} progress={pre.get('progress', 0)}{extra}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 预解压失败: {e}"
 
     return mcp
 

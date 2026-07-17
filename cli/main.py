@@ -14,6 +14,7 @@ from agent_115.api import files as file_api
 from agent_115.api import share as share_api
 from agent_115.api import directory as dir_api
 from agent_115.api import life as life_api
+from agent_115.ops import unzip as unzip_ops
 
 log = logging.getLogger("115-agent")
 
@@ -326,6 +327,191 @@ def recent(ctx, op_type, limit):
             click.echo(f"    📄 {item.get('file_name', '')}")
         if len(group.get("items", [])) > 5:
             click.echo(f"    ... 还有 {len(group['items']) - 5} 项")
+
+
+# ── unzip ──────────────────────────────
+
+@cli.command()
+@click.argument("paths", nargs=-1, required=True)
+@click.option("--mode", "-m", type=click.Choice(["each", "direct"]), default="each",
+              help="each=分别解压到同名文件夹, direct=直接解压到当前目录")
+@click.option("--password", "-p", default="", help="解压密码")
+@click.option("--delete/--no-delete", default=False,
+              help="体积检查通过后删除原压缩包（默认保留）")
+@click.option("--skip-pre", is_flag=True, help="跳过预解压")
+@click.option("--timeout", default=300, show_default=True, help="正式解压超时秒数")
+@click.option("--pre-timeout", default=600, show_default=True, help="预解压超时秒数")
+@pass_ctx
+def unzip(ctx, paths, mode, password, delete, skip_pre, timeout, pre_timeout):
+    """云解压压缩包（支持文件路径或目录批量）
+
+    体积策略：若解压结果小于原压缩包，删除不完整结果并保留压缩包。
+    """
+    ctx.ensure_cookie()
+    secret = password or None
+    results = []
+
+    def _prompt_password():
+        try:
+            return click.prompt("请输入解压密码", default="", show_default=False)
+        except click.Abort:
+            return None
+
+    for path in paths:
+        resolved = _resolve_unzip_targets(ctx.client, path)
+        if resolved["kind"] == "error":
+            raise click.UsageError(resolved["message"])
+
+        if resolved["kind"] == "batch":
+            batch = unzip_ops.unzip_batch(
+                ctx.client,
+                resolved["entries"],
+                parent_cid=resolved["parent_cid"],
+                mode=mode,
+                secret=secret,
+                delete_zip=delete,
+                skip_pre_extract=skip_pre,
+                timeout_s=timeout,
+                pre_timeout_s=pre_timeout,
+                on_need_password=_prompt_password if not secret else None,
+            )
+            results.extend(batch)
+        else:
+            e = resolved["entry"]
+            r = unzip_ops.unzip_one(
+                ctx.client,
+                pick_code=e.pick_code,
+                file_id=e.id,
+                file_name=e.name,
+                parent_cid=resolved["parent_cid"],
+                archive_size=int(e.size or 0),
+                mode=mode,
+                secret=secret,
+                delete_zip=delete,
+                skip_pre_extract=skip_pre,
+                timeout_s=timeout,
+                pre_timeout_s=pre_timeout,
+                on_need_password=_prompt_password if not secret else None,
+            )
+            results.append(r)
+
+    if ctx.json_output:
+        click.echo(json.dumps([r.__dict__ for r in results], ensure_ascii=False))
+        return
+
+    if not results:
+        click.echo("(无压缩包)")
+        return
+
+    for i, r in enumerate(results, 1):
+        color = "green" if r.status == "success" else (
+            "yellow" if r.status in ("incomplete", "skipped", "password_required") else "red"
+        )
+        size_info = ""
+        if r.archive_size or r.extracted_size:
+            size_info = f"  size={_fmt_size(r.extracted_size)}/{_fmt_size(r.archive_size)}"
+        del_info = "  [zip deleted]" if r.zip_deleted else ""
+        click.secho(
+            f"[{i}/{len(results)}] {r.archive_name}  mode={r.mode}  {r.status}{size_info}{del_info}",
+            fg=color,
+        )
+        if r.message:
+            click.echo(f"    {r.message}")
+
+
+@cli.command("unzip-pre")
+@click.argument("paths", nargs=-1, required=True)
+@click.option("--password", "-p", default="", help="解压密码")
+@click.option("--pre-timeout", default=600, show_default=True, help="预解压超时秒数")
+@pass_ctx
+def unzip_pre(ctx, paths, password, pre_timeout):
+    """预解压（索引）压缩包，完成后才可正式解压"""
+    ctx.ensure_cookie()
+    secret = password or None
+    rows = []
+
+    def _prompt_password():
+        try:
+            return click.prompt("请输入解压密码", default="", show_default=False)
+        except click.Abort:
+            return None
+
+    for path in paths:
+        resolved = _resolve_unzip_targets(ctx.client, path)
+        if resolved["kind"] == "error":
+            raise click.UsageError(resolved["message"])
+        entries = resolved["entries"] if resolved["kind"] == "batch" else [resolved["entry"]]
+        for e in entries:
+            if e.is_dir or not e.pick_code:
+                continue
+            if not unzip_ops.is_archive_name(e.name) and "无法云解压" in (e.name or ""):
+                continue
+            pre = unzip_ops.ensure_pre_extract(
+                ctx.client,
+                e.pick_code,
+                secret=secret,
+                file_id=e.id,
+                file_name=e.name,
+                timeout_s=pre_timeout,
+                on_need_password=_prompt_password if not secret else None,
+            )
+            rows.append({
+                "name": e.name,
+                "pick_code": e.pick_code,
+                "status": pre.get("status"),
+                "progress": pre.get("progress"),
+                "renamed_to": pre.get("renamed_to", ""),
+                "message": pre.get("status"),
+            })
+
+    if ctx.json_output:
+        click.echo(json.dumps(rows, ensure_ascii=False))
+        return
+
+    if not rows:
+        click.echo("(无压缩包)")
+        return
+    for i, row in enumerate(rows, 1):
+        click.echo(f"[{i}/{len(rows)}] {row['name']}  {row['status']}  progress={row.get('progress', 0)}")
+        if row.get("renamed_to"):
+            click.echo(f"    已重命名: {row['renamed_to']}")
+
+
+def _resolve_unzip_targets(client, path: str) -> dict:
+    """解析 unzip 路径：单文件 / 目录批量 / fid:"""
+    path = (path or "").strip()
+    if not path:
+        return {"kind": "error", "message": "路径不能为空"}
+
+    # fid:xxx 或纯数字
+    if path.isdigit() or (path.startswith("fid:") and len(path) > 4):
+        return {"kind": "error", "message": "请使用文件路径（需定位父目录与 pick_code），暂不支持纯 fid"}
+
+    parent, name = _split_path(path)
+    parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
+
+    # 先当目录试
+    try:
+        cid = file_api.resolve_path_to_cid(client, path.strip("/"))
+        entries = unzip_ops.collect_archives_in_dir(client, cid)
+        if entries:
+            return {"kind": "batch", "entries": entries, "parent_cid": cid}
+        # 空目录或无压缩包：若 path 自身是文件名匹配则下面处理
+    except Exception:
+        cid = None
+
+    # 文件：在父目录按名搜索
+    entries = file_api.search_files_by_name(client, parent_cid, name) if name else []
+    files = [e for e in entries if not e.is_dir and (e.name == name or name in e.name)]
+    if not files and name:
+        files = [e for e in entries if not e.is_dir]
+    if len(files) == 1 or (files and files[0].name == name):
+        e = next((x for x in files if x.name == name), files[0])
+        return {"kind": "file", "entry": e, "parent_cid": parent_cid}
+
+    if cid is not None:
+        return {"kind": "error", "message": f"目录内无压缩包: {path}"}
+    return {"kind": "error", "message": f"未找到: {path}"}
 
 
 # ── 辅助函数 ──────────────────────────────

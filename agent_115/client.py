@@ -133,14 +133,45 @@ class Client:
     def post(self, path: str, *, data: Optional[dict] = None, **kw) -> Any:
         return self.request("POST", f"{API_BASE}{path}", data=data, **kw)
 
-    def form_post(self, path: str, *, data: Optional[dict] = None, **kw) -> Any:
-        """POST application/x-www-form-urlencoded"""
+    def form_post(self, path: str, *, data: Optional[dict | str] = None, **kw) -> Any:
+        """POST application/x-www-form-urlencoded
+
+        data 可为 dict，或已 urlencode 的字符串（用于 extract_file[] 等多值字段）。
+        """
         headers = kw.pop("headers", {})
         headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
         return self.request(
             "POST", f"{API_BASE}{path}",
             data=data, headers=headers, **kw,
         )
+
+    @staticmethod
+    def encode_form(
+        fields: Optional[dict] = None,
+        *,
+        arrays: Optional[dict[str, list]] = None,
+        style: str = "bracket",
+    ) -> str:
+        """编码 form 体，支持重复键数组。
+
+        style:
+          - bracket: key[]=a&key[]=b  （jQuery 默认）
+          - index:   key[0]=a&key[1]=b（与 fid[i] 一致）
+        """
+        pairs: list[tuple[str, str]] = []
+        for k, v in (fields or {}).items():
+            if v is None:
+                continue
+            pairs.append((str(k), str(v)))
+        for key, values in (arrays or {}).items():
+            for i, val in enumerate(values or []):
+                if val is None:
+                    continue
+                if style == "index":
+                    pairs.append((f"{key}[{i}]", str(val)))
+                else:
+                    pairs.append((f"{key}[]", str(val)))
+        return urlencode(pairs)
 
     def app_request(self, method: str, path: str, **kw) -> Any:
         """请求 proapi 接口"""

@@ -406,6 +406,96 @@ def empty_recycle_bin(client: Client) -> dict:
     return {"ok": bool(body.get("state"))}
 
 
+def parse_size_to_bytes(size) -> int:
+    """将 115 返回的体积字段转为字节。
+
+    支持 int/float、纯数字字符串，以及 ``139.53GB`` / ``1.2 MB`` 等人类可读格式。
+    """
+    if size is None or size == "":
+        return 0
+    if isinstance(size, bool):
+        return 0
+    if isinstance(size, (int, float)):
+        return int(size)
+    text = str(size).strip().replace(",", "")
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        pass
+    m = re.match(r"^([\d.]+)\s*([KMGTPE]?B?)$", text, re.I)
+    if not m:
+        # 兼容中文单位：KB/MB/GB/TB 简写 K/M/G/T
+        m = re.match(r"^([\d.]+)\s*([KMGTPE])$", text, re.I)
+    if not m:
+        log.warning("无法解析体积: %r", size)
+        return 0
+    num = float(m.group(1))
+    unit = (m.group(2) or "B").upper()
+    if unit == "B":
+        mul = 1
+    elif unit in ("K", "KB"):
+        mul = 1024
+    elif unit in ("M", "MB"):
+        mul = 1024 ** 2
+    elif unit in ("G", "GB"):
+        mul = 1024 ** 3
+    elif unit in ("T", "TB"):
+        mul = 1024 ** 4
+    elif unit in ("P", "PB"):
+        mul = 1024 ** 5
+    elif unit in ("E", "EB"):
+        mul = 1024 ** 6
+    else:
+        mul = 1
+    return int(num * mul)
+
+
+def get_category_info(client: Client, cid: str) -> dict:
+    """查看文件/文件夹信息，含官方体积
+
+    请求: GET /category/get?cid={id}
+
+    - 文件夹: size 如 ``139.53GB``，file_category=0，含 count/folder_count
+    - 文件: size 如 ``2.56MB``，file_category=1，含 sha1
+
+    注意：参数名虽是 cid，实际对文件传 fid 同样可用。
+
+    Returns:
+        {
+          id, name, count, folder_count, size_raw, size_bytes,
+          pick_code, file_category, is_dir, sha1, paths, raw
+        }
+    """
+    if cid is None or str(cid) == "":
+        raise ValidationError("cid 不能为空")
+
+    body = client.get("/category/get", params={"cid": str(cid)}, timeout=30)
+    # 该接口字段在顶层（与部分 data 包裹接口不同）
+    size_raw = body.get("size", "")
+    file_category = str(body.get("file_category") or "")
+    return {
+        "id": str(body.get("cid") or cid),
+        "cid": str(body.get("cid") or cid),
+        "name": str(body.get("file_name") or body.get("name") or ""),
+        "count": int(body.get("count") or 0),
+        "folder_count": int(body.get("folder_count") or 0),
+        "size_raw": size_raw,
+        "size_bytes": parse_size_to_bytes(size_raw),
+        "pick_code": str(body.get("pick_code") or "").strip(),
+        "file_category": file_category,
+        "is_dir": file_category == "0" or file_category == 0,
+        "sha1": str(body.get("sha1") or "").strip(),
+        "paths": body.get("paths") or [],
+        "raw": body,
+    }
+
+
+# 别名：文件与文件夹共用同一接口
+get_file_info = get_category_info
+
+
 def create_folder(client: Client, name: str, parent_cid: str = "0") -> dict:
     """创建新目录
 
