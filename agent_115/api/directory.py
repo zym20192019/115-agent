@@ -1,8 +1,12 @@
 """115 官方目录树导出 API"""
 
+import json
 import logging
+import urllib.parse
+import urllib.request
 import time
-from typing import Any, Dict, Optional
+from http.cookies import SimpleCookie
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..client import Client
 from ..exceptions import APIError
@@ -44,22 +48,12 @@ def export_tree(client: Client, folder_cid: str, layer_limit: int = 25) -> Dict[
 
 def _download_export(client: Client, status: dict) -> Dict[str, Any]:
     """通过 pick_code 下载导出的目录树 TXT"""
-    from .files import get_file_download_info
-    import requests
-
     pick_code = status["pick_code"]
-    dl_info = get_file_download_info(client, pick_code)
-
-    urls = dl_info.get("urls") or dl_info.get("url", []) or []
-    if isinstance(urls, str):
-        urls = [urls]
+    urls, download_cookie = _resolve_download_payload(client, pick_code)
     if not urls:
         raise APIError("无法获取下载链接")
 
-    # 尝试下载
-    resp = requests.get(urls[0], timeout=60, headers={"User-Agent": client._session.headers["User-Agent"]})
-    resp.raise_for_status()
-    raw_bytes = resp.content
+    raw_bytes = _download_tree_bytes(client, urls, download_cookie)
 
     # 解码文本（自动探测编码）
     text_content = _decode_tree_text(raw_bytes)
@@ -71,6 +65,87 @@ def _download_export(client: Client, status: dict) -> Dict[str, Any]:
         "content": text_content,
         "content_size": len(text_content),
     }
+
+
+def _collect_download_urls(payload: Any) -> List[str]:
+    """Extract download URLs from the nested response returned by 115."""
+    urls: List[str] = []
+    seen: Set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            value = node.strip()
+            if value.startswith(("http://", "https://")) and value not in seen:
+                seen.add(value)
+                urls.append(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for key in ("url", "download_url", "file_url", "download_url_web", "download_url_web2"):
+                walk(node.get(key))
+            for key in ("data", "urls", "result", "info"):
+                walk(node.get(key))
+
+    walk(payload)
+    return urls
+
+
+def _resolve_download_payload(client: Client, pick_code: str) -> Tuple[List[str], str]:
+    """Resolve a pickcode through the current webapi download endpoint."""
+    url = "https://webapi.115.com/files/download?pickcode=" + urllib.parse.quote(pick_code)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Cookie": client.get_cookie_str(),
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://115.com/",
+            "Origin": "https://115.com",
+            "User-Agent": "Mozilla/5.0 115-agent",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=45) as response:
+        body = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="ignore")
+        payload = json.loads(body)
+        response_cookies = response.headers.get_all("Set-Cookie") or []
+
+    if not payload.get("state", False):
+        raise APIError(payload.get("error") or payload.get("message") or "115 下载地址解析失败", response=payload)
+
+    extra_cookie_pairs: List[str] = []
+    for raw_cookie in response_cookies:
+        jar = SimpleCookie()
+        jar.load(raw_cookie)
+        for key, morsel in jar.items():
+            pair = f"{key}={morsel.value}"
+            if pair not in extra_cookie_pairs:
+                extra_cookie_pairs.append(pair)
+    return _collect_download_urls(payload), "; ".join(extra_cookie_pairs)
+
+
+def _download_tree_bytes(client: Client, urls: List[str], download_cookie: str = "") -> bytes:
+    """Download the exported TXT with media-hub-compatible headers/cookies."""
+    merged_cookie = "; ".join(filter(None, [client.get_cookie_str(), download_cookie]))
+    headers = {
+        "Cookie": merged_cookie,
+        "Referer": "https://115.com/",
+        "Origin": "https://115.com",
+        "User-Agent": "Mozilla/5.0 115-agent",
+        "Accept": "*/*",
+    }
+    last_error: Optional[Exception] = None
+    for raw_url in urls:
+        parts = urllib.parse.urlsplit(raw_url)
+        encoded_path = urllib.parse.quote(urllib.parse.unquote(parts.path), safe="/%:@+")
+        target = urllib.parse.urlunsplit((parts.scheme, parts.netloc, encoded_path, parts.query, parts.fragment))
+        try:
+            request = urllib.request.Request(target, headers=headers, method="GET")
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except Exception as exc:
+            last_error = exc
+    raise APIError(f"目录树文件下载失败: {last_error}") from last_error
 
 
 def _decode_tree_text(raw_bytes: bytes) -> str:
