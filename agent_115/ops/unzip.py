@@ -89,6 +89,10 @@ def sum_entry_size(client: Client, entry_id: str, is_dir: bool, known_size: int 
     文件/目录统一走官方 ``GET /category/get?cid=``（文件传 fid 同样可用），
     不递归列目录。失败返回 -1（体积未知）；成功返回 size_bytes（可为 0）。
     ``known_size`` 仅作接口失败时的弱回退（文件），避免误删。
+
+    ⚠️ 2026-08-06: category/get 的 size 是四舍五入字符串，精度有限；
+    比较容差已由调用方（unzip_one 的 1%/5% 容差）吸收，此处不需递归求和
+    （递归还会踩 list_files 的 is_dir bug 导致总和恒为 0）。
     """
     try:
         info = file_api.get_category_info(client, entry_id)
@@ -399,7 +403,8 @@ def unzip_one(
     size_unknown = extracted_size < 0
 
     arch = int(archive_size or 0)
-    if not size_unknown and arch > 0 and extracted_size < arch:
+    # 2026-08-06: 容差 5%（~0.45GB@9GB），吸收 category/get 字符串精度损失 + 秒传/去重差异；≤5% 视为解压正确
+    if not size_unknown and arch > 0 and extracted_size < arch * 0.95:
         # 不完整：删结果，保 zip
         if created_ids:
             _safe_delete(client, created_ids, parent_cid if not created_folder_id else parent_cid)
