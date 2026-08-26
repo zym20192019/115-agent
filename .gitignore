@@ -6,3 +6,7 @@ dist/
 115_agent.egg-info/
 web/frontend/node_modules/
 web/frontend/dist/
+
+# runtime artifacts
+.115-api-rate.lock
+*.bak
