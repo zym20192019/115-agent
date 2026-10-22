@@ -1,7 +1,6 @@
 import multiprocessing as mp
 import threading
 import time
-from types import SimpleNamespace
 
 import requests
 

@@ -3,8 +3,7 @@
 import json
 import logging
 import os
-import sys
-from typing import Optional
+from dataclasses import asdict
 
 import click
 
@@ -22,35 +21,48 @@ log = logging.getLogger("115-agent")
 # ── 全局上下文 ──────────────────────────────
 
 class Context:
-    def __init__(self):
+    def __init__(self, cookie: str = "", json_output: bool = False):
         self.client = Client()
+        self.cookie_override = cookie
+        self.json_output = json_output
         self._cookie_loaded = False
 
     def ensure_cookie(self):
         if self._cookie_loaded:
             return
-        cookie = load_cookie()
-        if cookie:
-            self.client.set_cookie(cookie)
-            self._cookie_loaded = True
-        else:
+        cookie = load_cookie(self.cookie_override)
+        if not cookie:
             raise click.UsageError(
-                "请设置环境变量 PAN115_COOKIE，或使用 115 login <cookie>"
+                "未找到 115 Cookie：请使用 -c/--cookie、环境变量 PAN115_COOKIE，或先执行 115 login <cookie>"
             )
+        self.client.set_cookie(cookie)
+        self._cookie_loaded = True
 
 
-pass_ctx = click.make_pass_decorator(Context, ensure=True)
+pass_ctx = click.make_pass_decorator(Context)
+
+
+class FriendlyGroup(click.Group):
+    """把 SDK 异常转成简洁的错误提示，而不是整段 traceback"""
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except Agent115Error as exc:
+            raise click.ClickException(str(exc)) from exc
 
 
 # ── CLI 主入口 ──────────────────────────────
 
-@click.group()
+@click.group(cls=FriendlyGroup)
+@click.option("--cookie", "-c", default="", help="115 Cookie（默认读取 PAN115_COOKIE 或 .env）")
 @click.option("--json", "json_output", is_flag=True, help="JSON 格式输出")
+@click.option("--verbose", "-v", is_flag=True, help="输出请求日志")
 @click.pass_context
-def cli(ctx, json_output):
+def cli(ctx, cookie, json_output, verbose):
     """115-agent: 115 网盘命令行工具"""
-    ctx.obj = Context()
-    ctx.obj.json_output = json_output
+    logging.basicConfig(level=logging.INFO if verbose else logging.WARNING, format="%(message)s")
+    ctx.obj = Context(cookie, json_output)
 
 
 # ── login ──────────────────────────────
@@ -59,11 +71,13 @@ def cli(ctx, json_output):
 @click.argument("cookie")
 @pass_ctx
 def login(ctx, cookie):
-    """设置 115 Cookie 并保存到环境"""
+    """设置 115 Cookie 并保存到当前目录 .env"""
     ctx.client.set_cookie(cookie)
-    # 写入 .env 供下次使用
-    with open(".env", "w") as f:
-        f.write(f"PAN115_COOKIE={cookie}\n")
+    if not ctx.client.is_logged_in:
+        raise click.UsageError("Cookie 中缺少 UID 字段")
+    fd = os.open(".env", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"PAN115_COOKIE={cookie.strip()}\n")
     click.secho("✓ Cookie 已保存到 .env", fg="green")
 
 
@@ -78,11 +92,11 @@ def login(ctx, cookie):
 def ls(ctx, path, limit, refresh, dirs_only):
     """列出目录内容"""
     ctx.ensure_cookie()
-    cid = file_api.resolve_path_to_cid(ctx.client, path) if path != "/" else "0"
+    cid = file_api.resolve_path_to_cid(ctx.client, path)
     entries = file_api.list_files(ctx.client, cid, limit=limit, refresh=refresh, folders_only=dirs_only)
 
     if ctx.json_output:
-        click.echo(json.dumps([e.__dict__ for e in entries], ensure_ascii=False))
+        click.echo(json.dumps([asdict(e) for e in entries], ensure_ascii=False))
         return
 
     if not entries:
@@ -100,14 +114,24 @@ def ls(ctx, path, limit, refresh, dirs_only):
 @cli.command()
 @click.argument("path", default="/")
 @click.option("--layer", "-l", default=25, help="目录层级")
+@click.option("--output", "-o", type=click.Path(dir_okay=False, writable=True), help="完整目录树保存到文件")
+@click.option("--max-wait", default=30, show_default=True, help="等待 115 生成目录树的最长分钟数")
 @pass_ctx
-def tree(ctx, path, layer):
-    """导出目录树"""
+def tree(ctx, path, layer, output, max_wait):
+    """导出目录树（大目录生成需要数分钟）"""
     ctx.ensure_cookie()
-    cid = file_api.resolve_path_to_cid(ctx.client, path) if path != "/" else "0"
-    result = dir_api.export_tree(ctx.client, cid, layer_limit=layer)
-    click.secho(f"✓ {result['file_name']} ({_fmt_size(result['content_size'])})", fg="green")
-    click.echo(result["content"][:2000])
+    cid = file_api.resolve_path_to_cid(ctx.client, path)
+    click.echo("已提交导出任务，等待 115 生成目录树…")
+    result = dir_api.export_tree(ctx.client, cid, layer_limit=layer, max_wait_s=max_wait * 60)
+    click.secho(f"✓ {result['file_name']} ({result['content_size']} 字符)", fg="green")
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(result["content"])
+        click.echo(f"已保存到 {output}")
+    else:
+        click.echo(result["content"][:2000])
+        if result["content_size"] > 2000:
+            click.echo("…（仅显示前 2000 字符，使用 -o 保存完整内容）")
 
 
 # ── rename ──────────────────────────────
@@ -117,22 +141,13 @@ def tree(ctx, path, layer):
 @click.argument("new_name")
 @pass_ctx
 def rename(ctx, path, new_name):
-    """重命名文件或目录"""
+    """重命名文件或目录（PATH 可为路径或 fid:<ID>）"""
     ctx.ensure_cookie()
-    # path 格式：/目录文件路径 或 file_id
-    # 如果是 file_id 直接使用
-    if path.isdigit() or (path.startswith("fid:") and len(path) > 4):
-        fid = path.replace("fid:", "")
-        file_api.rename_entry(ctx.client, fid, new_name)
+    if path.startswith("fid:") and len(path) > 4:
+        file_api.rename_entry(ctx.client, path[4:], new_name)
     else:
-        # 通过路径查找
-        parent, name = _split_path(path)
-        cid = file_api.resolve_path_to_cid(ctx.client, parent) if parent else "0"
-        entries = file_api.search_files_by_name(ctx.client, cid, name)
-        if not entries:
-            raise click.UsageError(f"未找到: {path}")
-        file_api.rename_entry(ctx.client, entries[0].id, new_name)
-
+        _, entry = file_api.resolve_path(ctx.client, path)
+        file_api.rename_entry(ctx.client, entry.id, new_name)
     click.secho(f"✓ 已重命名为: {new_name}", fg="green")
 
 
@@ -145,22 +160,12 @@ def rename(ctx, path, new_name):
 def rm(ctx, path, yes):
     """删除文件或目录（移入回收站）"""
     ctx.ensure_cookie()
-    parent, name = _split_path(path)
-    cid = file_api.resolve_path_to_cid(ctx.client, parent) if parent else "0"
-    entries = file_api.search_files_by_name(ctx.client, cid, name)
-    if not entries:
-        raise click.UsageError(f"未找到: {path}")
-
+    parent_cid, entry = file_api.resolve_path(ctx.client, path)
+    kind = "目录" if entry.is_dir else "文件"
     if not yes:
-        click.confirm(f"确认删除 {name} ({len(entries)} 项)?", abort=True)
-
-    entry_ids = [e.id for e in entries if not e.is_dir]
-    dir_ids = [e.id for e in entries if e.is_dir]
-    if dir_ids:
-        file_api.delete_entries(ctx.client, dir_ids, parent_cid=cid)
-    if entry_ids:
-        file_api.delete_entries(ctx.client, entry_ids, parent_cid=cid)
-    click.secho(f"✓ 已删除 {len(entries)} 项", fg="green")
+        click.confirm(f"确认删除{kind}「{entry.name}」?", abort=True)
+    file_api.delete_entries(ctx.client, [entry.id], parent_cid=parent_cid)
+    click.secho(f"✓ 已删除{kind}: {entry.name}", fg="green")
 
 
 # ── search ──────────────────────────────
@@ -178,7 +183,7 @@ def search(ctx, keyword, limit, page):
     if ctx.json_output:
         click.echo(json.dumps({
             "count": result["count"],
-            "entries": [e.__dict__ for e in result["entries"]],
+            "entries": [asdict(e) for e in result["entries"]],
         }, ensure_ascii=False))
         return
 
@@ -188,8 +193,8 @@ def search(ctx, keyword, limit, page):
         size_str = f" {_fmt_size(e.size)}" if not e.is_dir else ""
         click.echo(f"  {icon} {e.name}{size_str}")
 
-    if result["page_count"] > page:
-        click.echo(f"  共 {result['page_count']} 页，使用 -p {page + 1} 查看下一页")
+    if result["count"] > page * limit:
+        click.echo(f"  使用 -p {page + 1} 查看下一页")
 
 
 # ── mv ──────────────────────────────
@@ -201,16 +206,10 @@ def search(ctx, keyword, limit, page):
 def mv(ctx, path, target):
     """移动文件/目录到目标目录"""
     ctx.ensure_cookie()
-    parent, name = _split_path(path)
-    cid = file_api.resolve_path_to_cid(ctx.client, parent) if parent else "0"
-    entries = file_api.search_files_by_name(ctx.client, cid, name)
-    if not entries:
-        raise click.UsageError(f"未找到: {path}")
-
+    _, entry = file_api.resolve_path(ctx.client, path)
     target_cid = file_api.resolve_path_to_cid(ctx.client, target)
-    ids = [e.id for e in entries]
-    file_api.move_entries(ctx.client, ids, target_cid)
-    click.secho(f"✓ 已移动 {len(ids)} 项到 {target}", fg="green")
+    file_api.move_entries(ctx.client, [entry.id], target_cid)
+    click.secho(f"✓ 已移动「{entry.name}」到 {target}", fg="green")
 
 
 # ── mkdir ──────────────────────────────
@@ -221,10 +220,10 @@ def mv(ctx, path, target):
 def mkdir(ctx, path):
     """创建新目录"""
     ctx.ensure_cookie()
-    parent, name = _split_path(path)
+    parent, name = file_api.split_path(path)
     if not name:
         raise click.UsageError("路径不能为空")
-    parent_cid = file_api.resolve_path_to_cid(ctx.client, parent) if parent else "0"
+    parent_cid = file_api.resolve_path_to_cid(ctx.client, parent)
     result = file_api.create_folder(ctx.client, name, parent_cid)
     click.secho(f"✓ 已创建目录: {result['name']} (cid={result['cid']})", fg="green")
 
@@ -239,7 +238,7 @@ def share_receive(ctx, url, path):
     """接收分享链接"""
     ctx.ensure_cookie()
     info = share_api.parse_share_url(url)
-    cid = file_api.resolve_path_to_cid(ctx.client, path) if path != "/" else "0"
+    cid = file_api.resolve_path_to_cid(ctx.client, path)
     result = share_api.receive_share(ctx.client, info["share_code"],
         receive_code=info["receive_code"], cid=cid)
     click.secho(f"✓ 接收成功: task_id={result.get('task_id', '-')}", fg="green")
@@ -263,11 +262,7 @@ def recycle_ls(ctx, limit, page):
     if ctx.json_output:
         click.echo(json.dumps({
             "count": result["count"],
-            "items": [{
-                "rid": i.rid, "file_name": i.file_name,
-                "file_size": i.file_size, "is_dir": i.is_dir,
-                "cid": i.cid, "parent_name": i.parent_name,
-            } for i in result["items"]],
+            "items": [asdict(i) for i in result["items"]],
         }, ensure_ascii=False))
         return
 
@@ -290,10 +285,12 @@ def recycle_restore(ctx, rids):
 @pass_ctx
 def recycle_clear(ctx, yes):
     """清空回收站"""
+    ctx.ensure_cookie()
     if not yes:
         click.confirm("确认清空回收站? 此操作不可恢复!", abort=True)
-    ctx.ensure_cookie()
-    file_api.empty_recycle_bin(ctx.client)
+    result = file_api.empty_recycle_bin(ctx.client)
+    if not result["ok"]:
+        raise click.ClickException("清空回收站失败")
     click.secho("✓ 回收站已清空", fg="green")
 
 
@@ -319,14 +316,22 @@ def recent(ctx, op_type, limit):
 
     click.echo(f"📋 最近操作 ({result.get('count', 0)} 条):")
     for group in entries:
-        click.echo(f"\n  [{group.get('date', '')}] {group.get('tab_title', '')} (共 {group['total']} 项)")
-        for item in group.get("items", [])[:5]:  # 最多显示 5 条详情
+        items = group.get("items", [])
+        click.echo(f"\n  [{group.get('date', '')}] {group.get('tab_title', '')} (共 {group.get('total', len(items))} 项)")
+        for item in items[:5]:  # 最多显示 5 条详情
             click.echo(f"    📄 {item.get('file_name', '')}")
-        if len(group.get("items", [])) > 5:
-            click.echo(f"    ... 还有 {len(group['items']) - 5} 项")
+        if len(items) > 5:
+            click.echo(f"    ... 还有 {len(items) - 5} 项")
 
 
 # ── unzip ──────────────────────────────
+
+def _prompt_password():
+    try:
+        return click.prompt("请输入解压密码", default="", show_default=False) or None
+    except click.Abort:
+        return None
+
 
 @cli.command()
 @click.argument("paths", nargs=-1, required=True)
@@ -346,41 +351,32 @@ def unzip(ctx, paths, mode, password, delete, skip_pre, timeout, pre_timeout):
     """
     ctx.ensure_cookie()
     secret = password or None
+    on_need_password = _prompt_password if not secret else None
     results = []
 
-    def _prompt_password():
-        try:
-            return click.prompt("请输入解压密码", default="", show_default=False)
-        except click.Abort:
-            return None
-
     for path in paths:
-        resolved = _resolve_unzip_targets(ctx.client, path)
-        if resolved["kind"] == "error":
-            raise click.UsageError(resolved["message"])
-
-        if resolved["kind"] == "batch":
-            batch = unzip_ops.unzip_batch(
+        kind, parent_cid, entries = _resolve_unzip_targets(ctx.client, path)
+        if kind == "batch":
+            results.extend(unzip_ops.unzip_batch(
                 ctx.client,
-                resolved["entries"],
-                parent_cid=resolved["parent_cid"],
+                entries,
+                parent_cid=parent_cid,
                 mode=mode,
                 secret=secret,
                 delete_zip=delete,
                 skip_pre_extract=skip_pre,
                 timeout_s=timeout,
                 pre_timeout_s=pre_timeout,
-                on_need_password=_prompt_password if not secret else None,
-            )
-            results.extend(batch)
+                on_need_password=on_need_password,
+            ))
         else:
-            e = resolved["entry"]
-            r = unzip_ops.unzip_one(
+            e = entries[0]
+            results.append(unzip_ops.unzip_one(
                 ctx.client,
                 pick_code=e.pick_code,
                 file_id=e.id,
                 file_name=e.name,
-                parent_cid=resolved["parent_cid"],
+                parent_cid=parent_cid,
                 archive_size=int(e.size or 0),
                 mode=mode,
                 secret=secret,
@@ -388,12 +384,11 @@ def unzip(ctx, paths, mode, password, delete, skip_pre, timeout, pre_timeout):
                 skip_pre_extract=skip_pre,
                 timeout_s=timeout,
                 pre_timeout_s=pre_timeout,
-                on_need_password=_prompt_password if not secret else None,
-            )
-            results.append(r)
+                on_need_password=on_need_password,
+            ))
 
     if ctx.json_output:
-        click.echo(json.dumps([r.__dict__ for r in results], ensure_ascii=False))
+        click.echo(json.dumps([asdict(r) for r in results], ensure_ascii=False))
         return
 
     if not results:
@@ -427,22 +422,9 @@ def unzip_pre(ctx, paths, password, pre_timeout):
     secret = password or None
     rows = []
 
-    def _prompt_password():
-        try:
-            return click.prompt("请输入解压密码", default="", show_default=False)
-        except click.Abort:
-            return None
-
     for path in paths:
-        resolved = _resolve_unzip_targets(ctx.client, path)
-        if resolved["kind"] == "error":
-            raise click.UsageError(resolved["message"])
-        entries = resolved["entries"] if resolved["kind"] == "batch" else [resolved["entry"]]
+        _, _, entries = _resolve_unzip_targets(ctx.client, path)
         for e in entries:
-            if e.is_dir or not e.pick_code:
-                continue
-            if not unzip_ops.is_archive_name(e.name) and "无法云解压" in (e.name or ""):
-                continue
             pre = unzip_ops.ensure_pre_extract(
                 ctx.client,
                 e.pick_code,
@@ -458,7 +440,6 @@ def unzip_pre(ctx, paths, password, pre_timeout):
                 "status": pre.get("status"),
                 "progress": pre.get("progress"),
                 "renamed_to": pre.get("renamed_to", ""),
-                "message": pre.get("status"),
             })
 
     if ctx.json_output:
@@ -474,60 +455,36 @@ def unzip_pre(ctx, paths, password, pre_timeout):
             click.echo(f"    已重命名: {row['renamed_to']}")
 
 
-def _resolve_unzip_targets(client, path: str) -> dict:
-    """解析 unzip 路径：单文件 / 目录批量 / fid:"""
+def _resolve_unzip_targets(client, path: str):
+    """解析 unzip 路径：目录 → 目录内全部压缩包；文件 → 该压缩包（精确匹配）。
+
+    返回 (kind, parent_cid, entries)，kind 为 "batch" 或 "file"。
+    """
     path = (path or "").strip()
     if not path:
-        return {"kind": "error", "message": "路径不能为空"}
+        raise click.UsageError("路径不能为空")
+    if path.startswith("fid:"):
+        raise click.UsageError("请使用文件路径（需定位父目录与 pick_code），暂不支持 fid")
 
-    # fid:xxx 或纯数字
-    if path.isdigit() or (path.startswith("fid:") and len(path) > 4):
-        return {"kind": "error", "message": "请使用文件路径（需定位父目录与 pick_code），暂不支持纯 fid"}
-
-    parent, name = _split_path(path)
-    parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
-
-    # 先当目录试
-    try:
-        cid = file_api.resolve_path_to_cid(client, path.strip("/"))
-        entries = unzip_ops.collect_archives_in_dir(client, cid)
-        if entries:
-            return {"kind": "batch", "entries": entries, "parent_cid": cid}
-        # 空目录或无压缩包：若 path 自身是文件名匹配则下面处理
-    except Exception:
-        cid = None
-
-    # 文件：在父目录按名搜索
-    entries = file_api.search_files_by_name(client, parent_cid, name) if name else []
-    files = [e for e in entries if not e.is_dir and (e.name == name or name in e.name)]
-    if not files and name:
-        files = [e for e in entries if not e.is_dir]
-    if len(files) == 1 or (files and files[0].name == name):
-        e = next((x for x in files if x.name == name), files[0])
-        return {"kind": "file", "entry": e, "parent_cid": parent_cid}
-
-    if cid is not None:
-        return {"kind": "error", "message": f"目录内无压缩包: {path}"}
-    return {"kind": "error", "message": f"未找到: {path}"}
+    parent_cid, entry = file_api.resolve_path(client, path)
+    if entry.is_dir:
+        return "batch", entry.id, unzip_ops.collect_archives_in_dir(client, entry.id)
+    if not unzip_ops.is_archive_name(entry.name):
+        raise click.UsageError(f"不是可云解压的压缩包: {entry.name}")
+    if not entry.pick_code:
+        raise click.UsageError(f"缺少 pick_code: {entry.name}")
+    return "file", parent_cid, [entry]
 
 
 # ── 辅助函数 ──────────────────────────────
 
 def _fmt_size(size: int) -> str:
+    size = float(size or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:
             return f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}PB"
-
-
-def _split_path(path: str) -> tuple:
-    """将路径拆分为 (父目录, 名称)，如 /影视/电影 -> (/影视, 电影)"""
-    path = path.strip("/")
-    if "/" in path:
-        idx = path.rfind("/")
-        return path[:idx] or "", path[idx + 1:]
-    return "", path
 
 
 if __name__ == "__main__":

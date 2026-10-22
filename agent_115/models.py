@@ -1,7 +1,7 @@
 """115 API 数据模型"""
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 
 @dataclass

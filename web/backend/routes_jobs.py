@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import asdict
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import auth_store, require_user
 from .jobs import event_payload, job_store
@@ -15,13 +15,16 @@ router = APIRouter(prefix="/api/jobs")
 
 
 class UnzipBody(BaseModel):
-    path: str
-    mode: str = "each"
+    # 推荐：parent_cid + file_id（前端文件列表直接给出）；path 为兼容旧调用
+    parent_cid: str = "0"
+    file_id: str = ""
+    path: str = ""
+    mode: Literal["each", "direct"] = "each"
     password: str = ""
     delete_zip: bool = False
     skip_pre: bool = False
-    timeout: int = 300
-    pre_timeout: int = 600
+    timeout: int = Field(300, ge=30, le=7200)
+    pre_timeout: int = Field(600, ge=30, le=7200)
 
 
 def owned(request: Request, job_id: str):
@@ -35,9 +38,11 @@ def owned(request: Request, job_id: str):
 @router.post("/unzip")
 def create_unzip(body: UnzipBody, request: Request):
     user, token = require_user(request)
+    if not body.file_id and not body.path.strip():
+        raise HTTPException(422, "缺少 file_id 或 path")
     cookie = auth_store.get_cookie(token)
     if not cookie:
-        raise HTTPException(409, "请先配置 115 Cookie")
+        raise HTTPException(409, "服务器未配置 115 Cookie（.env 中的 PAN115_COOKIE）")
     job = job_store.create(user, "unzip")
     job_store.start_unzip(job, cookie, body.model_dump())
     return {"job_id": job.id}
@@ -46,13 +51,13 @@ def create_unzip(body: UnzipBody, request: Request):
 @router.get("")
 def list_jobs(request: Request):
     user, _ = require_user(request)
-    return {"items": [{"id": j.id, "kind": j.kind, "status": j.status, "progress": j.progress, "message": j.message} for j in job_store.list(user)]}
+    return {"items": [j.summary() for j in job_store.list(user)]}
 
 
 @router.get("/{job_id}")
 def get_job(job_id: str, request: Request):
     job = owned(request, job_id)
-    return {"id": job.id, "kind": job.kind, "status": job.status, "progress": job.progress, "message": job.message, "result": job.result, "events": [asdict(e) for e in job.events]}
+    return {**job.summary(), "result": job.result, "events": [asdict(e) for e in job.events]}
 
 
 @router.post("/{job_id}/cancel")
@@ -84,12 +89,12 @@ async def events(job_id: str, request: Request):
 
     async def stream():
         sent = last_id
-        while True:
-            current = [e for e in job.events if e.id > sent]
-            for event in current:
+        while not await request.is_disconnected():
+            for event in [e for e in job.events if e.id > sent]:
                 sent = event.id
                 yield f"id: {event.id}\ndata: {event_payload(event)}\n\n"
-            if job.status in ("success", "failed", "cancelled", "timeout", "incomplete", "damaged") and sent >= job.next_event_id - 1:
+            if job.is_finished and sent >= job.next_event_id - 1:
+                yield "event: end\ndata: {}\n\n"
                 break
             await asyncio.sleep(0.5)
 

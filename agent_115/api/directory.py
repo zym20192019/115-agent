@@ -13,41 +13,73 @@ from http.cookies import SimpleCookie
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..client import Client
-from ..exceptions import APIError
+from ..exceptions import APIError, AuthError, NetworkError
 
 log = logging.getLogger("115-agent.directory")
 
 
-def export_tree(client: Client, folder_cid: str, layer_limit: int = 25) -> Dict[str, Any]:
+# 十万级文件的目录树，115 需要数分钟才能生成完毕
+POLL_INTERVAL_S = 30
+POLL_MAX_WAIT_S = 30 * 60
+SUBMIT_RETRIES = 5
+SUBMIT_RETRY_WAIT_S = 10
+
+
+def export_tree(
+    client: Client,
+    folder_cid: str,
+    layer_limit: int = 25,
+    *,
+    poll_interval_s: float = POLL_INTERVAL_S,
+    max_wait_s: float = POLL_MAX_WAIT_S,
+) -> Dict[str, Any]:
     """生成目录树并等待完成，返回 TXT 文件内容
 
     Args:
         client: API 客户端
         folder_cid: 目录 CID
         layer_limit: 目录层级限制
+        poll_interval_s: 提交成功后查询生成状态的间隔
+        max_wait_s: 最长等待时间
 
     Returns:
         {file_name, content, file_id, pick_code, content_size}
     """
     from .files import export_directory_tree, query_export_status
 
-    # 1. 提交导出任务
-    result = export_directory_tree(client, folder_cid, layer_limit=layer_limit)
-    export_id = result["export_id"]
+    # 1. 提交导出任务；115 提示「有类似任务正在处理」或网络抖动时稍后重试
+    export_id = None
+    for attempt in range(1, SUBMIT_RETRIES + 1):
+        try:
+            export_id = export_directory_tree(client, folder_cid, layer_limit=layer_limit)["export_id"]
+            break
+        except AuthError:
+            raise
+        except (APIError, NetworkError) as exc:
+            if attempt == SUBMIT_RETRIES:
+                raise
+            log.warning("目录树导出提交失败，%s 秒后重试 (%s/%s): %s", SUBMIT_RETRY_WAIT_S, attempt, SUBMIT_RETRIES, exc)
+            time.sleep(SUBMIT_RETRY_WAIT_S)
     log.info(f"导出任务已提交: export_id={export_id}")
 
     # 2. 轮询直到完成
-    max_retries = 60
-    for i in range(max_retries):
-        time.sleep(2)
-        status = query_export_status(client, export_id)
+    waited = 0.0
+    while waited < max_wait_s:
+        time.sleep(poll_interval_s)
+        waited += poll_interval_s
+        try:
+            status = query_export_status(client, export_id)
+        except NetworkError as exc:
+            log.warning("查询目录树导出状态失败，继续等待: %s", exc)
+            continue
         if status["status"] == "completed":
             log.info(f"导出完成: {status.get('file_name')}")
             return _download_export(client, status)
         if status["status"] in ("failed", "error"):
             raise APIError(f"导出失败: {status.get('error', '未知错误')}")
+        log.info("目录树生成中，已等待 %d 秒", waited)
 
-    raise APIError("导出任务超时")
+    raise APIError(f"导出任务超时（已等待 {int(max_wait_s // 60)} 分钟）")
 
 
 def _download_export(client: Client, status: dict) -> Dict[str, Any]:
@@ -155,7 +187,14 @@ def _decode_tree_text(raw_bytes: bytes) -> str:
     payload = raw_bytes or b""
     if not payload:
         return ""
-    for encoding in ("utf-8-sig", "utf-16", "utf-16le", "gb18030", "utf-8"):
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return payload.decode("utf-16", errors="ignore")
+    # 115 导出的目录树是无 BOM 的 UTF-16LE。纯英文/数字文件名按 UTF-8 也能“解码成功”，
+    # 结果却夹满 \x00，因此先看奇数位 NUL 字节占比
+    sample = payload[:4096]
+    if sample[1::2].count(0) > len(sample) // 4:
+        return payload.decode("utf-16le", errors="ignore")
+    for encoding in ("utf-8-sig", "utf-16le", "gb18030"):
         try:
             text = payload.decode(encoding)
             if text:

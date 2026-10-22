@@ -8,11 +8,12 @@ import secrets
 import time
 from dataclasses import dataclass
 from threading import RLock
-from typing import Optional
 
 from fastapi import HTTPException, Request, Response
 
-from agent_115.client import GLOBAL_RATE_LIMITER
+from agent_115.client import GLOBAL_RATE_LIMITER, SETTINGS_PATH, load_cookie
+
+SESSION_TTL_S = 86400
 
 
 @dataclass
@@ -24,15 +25,15 @@ class WebUser:
 class AuthStore:
     def __init__(self) -> None:
         username = os.getenv("WEB_ADMIN_USER", "admin")
-        password = os.getenv("WEB_ADMIN_PASSWORD", "change-me")
+        password = os.getenv("WEB_ADMIN_PASSWORD", "")
+        if not password or password == "change-me":
+            # 不再使用公开的默认密码：未配置时每次启动随机生成并打印到服务日志
+            password = secrets.token_urlsafe(12)
+            print(f"[115-agent web] 未设置 WEB_ADMIN_PASSWORD，本次启动的临时密码：{username} / {password}", flush=True)
         self.users = {username: WebUser(username, self._hash(password))}
-        self.sessions: dict[str, str] = {}
-        # Seed the per-session setting from the service environment so the
-        # existing PAN115_COOKIE remains usable after WebUI restarts.
+        self.sessions: dict[str, tuple[str, float]] = {}
         self.cookies: dict[str, str] = {}
-        from agent_115.client import load_cookie
-        self.default_cookie = load_cookie()
-        self.settings_path = os.getenv("WEBUI_SETTINGS_PATH", "/opt/115-agent/.webui-settings.json")
+        self.settings_path = SETTINGS_PATH
         self._load_rate_limit()
         self.lock = RLock()
 
@@ -74,12 +75,17 @@ class AuthStore:
             return None
         token = secrets.token_urlsafe(32)
         with self.lock:
-            self.sessions[token] = username
+            now = time.time()
+            self.sessions = {t: s for t, s in self.sessions.items() if s[1] > now}
+            self.sessions[token] = (username, now + SESSION_TTL_S)
         return token
 
     def user_for(self, token: str | None) -> str | None:
         with self.lock:
-            return self.sessions.get(token or "")
+            session = self.sessions.get(token or "")
+            if not session or session[1] <= time.time():
+                return None
+            return session[0]
 
     def logout(self, token: str | None) -> None:
         with self.lock:
@@ -92,7 +98,8 @@ class AuthStore:
 
     def get_cookie(self, token: str) -> str:
         with self.lock:
-            return self.cookies.get(token, "") or self.default_cookie
+            # 每次读取 .env / 环境变量，服务器上更新 Cookie 后无需重启 WebUI
+            return self.cookies.get(token, "") or load_cookie()
 
 
 auth_store = AuthStore()
@@ -107,4 +114,4 @@ def require_user(request: Request) -> tuple[str, str]:
 
 
 def set_session(response: Response, token: str) -> None:
-    response.set_cookie("web_session", token, httponly=True, samesite="lax", secure=False, max_age=86400)
+    response.set_cookie("web_session", token, httponly=True, samesite="lax", secure=False, max_age=SESSION_TTL_S)

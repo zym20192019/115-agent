@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from typing import Callable, List, Literal, Optional
 
 from ..client import Client
-from ..exceptions import APIError, ValidationError
+from ..exceptions import Agent115Error, APIError
 from ..models import FileEntry, UnzipResult
 from ..api import extract as extract_api
 from ..api import files as file_api
@@ -68,19 +68,7 @@ def list_all_entries(
     refresh: bool = False,
 ) -> List[FileEntry]:
     """分页列出目录全部条目。"""
-    offset = 0
-    results: List[FileEntry] = []
-    while True:
-        batch = file_api.list_files(
-            client, cid, limit=page_size, offset=offset, refresh=refresh and offset == 0,
-        )
-        if not batch:
-            break
-        results.extend(batch)
-        if len(batch) < page_size:
-            break
-        offset += len(batch)
-    return results
+    return file_api.list_all_files(client, cid, page_size=page_size, refresh=refresh)
 
 
 def sum_entry_size(client: Client, entry_id: str, is_dir: bool, known_size: int = 0) -> int:
@@ -91,8 +79,7 @@ def sum_entry_size(client: Client, entry_id: str, is_dir: bool, known_size: int 
     ``known_size`` 仅作接口失败时的弱回退（文件），避免误删。
 
     ⚠️ 2026-08-06: category/get 的 size 是四舍五入字符串，精度有限；
-    比较容差已由调用方（unzip_one 的 1%/5% 容差）吸收，此处不需递归求和
-    （递归还会踩 list_files 的 is_dir bug 导致总和恒为 0）。
+    比较容差已由调用方（unzip_one 的 5% 容差）吸收，此处不需递归求和。
     """
     try:
         info = file_api.get_category_info(client, entry_id)
@@ -304,14 +291,15 @@ def unzip_one(
     extract_files, extract_dirs = _split_extract_lists(items)
     paths = extract_api.build_paths_string(path_parts)
 
-    # 快照（direct 或 each 未建新目录）
+    # 快照（direct 或 each 未建新目录）。快照失败时无法区分哪些是新解压出的条目，
+    # 后续只能把体积视为未知——绝不能拿空快照做差集，否则父目录全部条目都会被当成“解压结果”删除
     need_snapshot = not created_folder_id
-    before: dict[str, FileEntry] = {}
+    before: Optional[dict[str, FileEntry]] = None
     if need_snapshot:
         try:
             before = snapshot_dir(client, parent_cid)
-        except APIError as e:
-            log.warning("快照失败: %s", e)
+        except Agent115Error as e:
+            log.warning("快照失败，本次不做体积校验与清理: %s", e)
 
     # 3) 提交解压
     try:
@@ -379,24 +367,35 @@ def unzip_one(
                 if extracted_size > 0 or attempt == 2:
                     break
                 time.sleep(1.5)
-        except APIError as e:
+            # 刚解压完 category/get 可能仍返回旧的 0：按“体积未知”处理，
+            # 否则会把实际已完整解压的目录当成不完整删掉
+            if extracted_size == 0:
+                extracted_size = -1
+        except Agent115Error as e:
             log.warning("统计解压目录体积失败: %s", e)
-            extracted_size = 0
+            extracted_size = -1
+    elif before is None:
+        extracted_size = -1
     else:
         try:
             after = snapshot_dir(client, parent_cid)
             new_names = set(after) - set(before)
-            # 若无 delta，按期望顶层名
             if not new_names:
-                expected = set(extract_files) | set(extract_dirs)
-                new_names = {n for n in expected if n in after}
-            created_entries = [after[n] for n in new_names if n in after]
+                # 没有新增条目（如 115 合并进了已有同名目录）：同名条目是用户原有数据，
+                # 不能计入 created_ids，否则体积不足时会被当成不完整结果删掉
+                extracted_size = -1
+            created_entries = [after[n] for n in new_names]
             created_ids = [e.id for e in created_entries]
             for e in created_entries:
                 size = sum_entry_size(client, e.id, e.is_dir, e.size)
-                extracted_size = size if size < 0 else extracted_size + size
-        except APIError as e:
-            log.warning("快照对比失败: %s", e)
+                if size < 0:
+                    extracted_size = -1
+                    break
+                extracted_size += size
+        except Agent115Error as e:
+            log.warning("快照对比失败，本次不做体积校验与清理: %s", e)
+            created_ids = []
+            extracted_size = -1
 
     base.extracted_size = max(0, int(extracted_size))
     base.created_ids = created_ids
@@ -407,7 +406,7 @@ def unzip_one(
     if not size_unknown and arch > 0 and extracted_size < arch * 0.95:
         # 不完整：删结果，保 zip
         if created_ids:
-            _safe_delete(client, created_ids, parent_cid if not created_folder_id else parent_cid)
+            _safe_delete(client, created_ids, parent_cid)
         base.status = "incomplete"
         base.message = (
             f"解压结果({_fmt(extracted_size)})小于原压缩包({_fmt(arch)})，"
@@ -418,7 +417,7 @@ def unzip_one(
 
     # 成功
     base.status = "success"
-    base.message = "解压完成"
+    base.message = "解压完成" + ("（未能获取解压结果体积，未做完整性校验）" if size_unknown else "")
 
     can_delete = (
         delete_zip
@@ -470,7 +469,7 @@ def unzip_batch(
                 archive_size=int(entry.size or 0),
             ))
             continue
-        if not is_archive_name(name) and not entry.pick_code:
+        if not is_archive_name(name):
             continue
         if not entry.pick_code:
             results.append(UnzipResult(

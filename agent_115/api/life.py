@@ -2,11 +2,11 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Optional
 from urllib.parse import urlencode
 
 from ..client import Client
-from ..exceptions import APIError, ValidationError
+from ..exceptions import APIError
 
 log = logging.getLogger("115-agent.life")
 

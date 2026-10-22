@@ -47,7 +47,7 @@ def me(request: Request):
 @router.put("/settings/115-cookie")
 def set_115_cookie(body: CookieBody, request: Request):
     require_user(request)
-    raise HTTPException(409, "Cookie 只从 /opt/115-agent/.env 的 PAN115_COOKIE 读取")
+    raise HTTPException(409, "Cookie 只从服务端环境变量或 .env 的 PAN115_COOKIE 读取")
 
 
 @router.get("/settings/115-cookie/status")

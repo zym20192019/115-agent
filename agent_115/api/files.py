@@ -52,29 +52,92 @@ def list_files(
     # data 可能是 dict（单条）或 list
     entries = data if isinstance(data, list) else data.get("data", data.get("entries", data))
 
-    results: List[FileEntry] = []
-    for item in entries if isinstance(entries, list) else []:
-        if not isinstance(item, dict):
-            continue
-        fid = str(item.get("fid") or item.get("id") or "")
-        is_dir = bool(item.get("cid")) or item.get("is_dir", False)
-        name = str(item.get("n") or item.get("name") or "").strip()
-        if not name:
-            continue
-
-        results.append(FileEntry(
-            id=fid or str(item.get("cid", "")),
-            name=name,
-            is_dir=is_dir,
-            cid=str(item.get("cid", "")),
-            size=int(item.get("s", 0) or 0),
-            pick_code=str(item.get("pc", "") or "").strip(),
-            sha1=str(item.get("sha", "") or "").upper(),
-            updated_at=str(item.get("te", "") or ""),
-            created_at=str(item.get("tp", "") or ""),
-        ))
-
+    results = [e for e in (_parse_entry(item) for item in (entries if isinstance(entries, list) else [])) if e]
+    if folders_only:
+        results = [e for e in results if e.is_dir]
     return results
+
+
+def _parse_entry(item: Any) -> Optional[FileEntry]:
+    """解析 /files 与 /files/search 返回的条目。
+
+    115 的文件条目带 fid，且其 cid 字段是**所在目录**；目录条目没有 fid，cid 是目录自身 ID、pid 是父目录。
+    因此必须以 fid 是否存在判断类型——不能用 cid（文件也有 cid）。
+    """
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("n") or item.get("name") or "").strip()
+    if not name:
+        return None
+    fid = str(item.get("fid") or "")
+    is_dir = not fid
+    return FileEntry(
+        id=str(item.get("cid") or item.get("id") or "") if is_dir else fid,
+        name=name,
+        is_dir=is_dir,
+        cid=str(item.get("pid") or "") if is_dir else str(item.get("cid") or ""),
+        size=int(item.get("s", 0) or 0),
+        pick_code=str(item.get("pc", "") or "").strip(),
+        sha1=str(item.get("sha", "") or "").upper(),
+        updated_at=str(item.get("te", "") or ""),
+        created_at=str(item.get("tp", "") or ""),
+    )
+
+
+def list_all_files(
+    client: Client,
+    cid: str,
+    *,
+    page_size: int = 1000,
+    refresh: bool = False,
+    folders_only: bool = False,
+) -> List[FileEntry]:
+    """分页列出目录下全部条目（目录在前）。"""
+    offset = 0
+    results: List[FileEntry] = []
+    while True:
+        batch = list_files(client, cid, limit=page_size, offset=offset, refresh=refresh and offset == 0)
+        if not batch:
+            break
+        results.extend(batch)
+        # show_dir=1 时目录排在文件之前：只要目录、且本页已出现文件，后面不会再有目录
+        if folders_only and not batch[-1].is_dir:
+            break
+        if len(batch) < page_size:
+            break
+        offset += len(batch)
+    if folders_only:
+        results = [e for e in results if e.is_dir]
+    return results
+
+
+def find_entry(client: Client, cid: str, name: str, *, is_dir: Optional[bool] = None) -> Optional[FileEntry]:
+    """在目录中按名称**精确**查找条目（遍历所有分页）。is_dir 为 None 时不限类型。"""
+    for entry in list_all_files(client, cid, folders_only=bool(is_dir)):
+        if entry.name == name and (is_dir is None or entry.is_dir == is_dir):
+            return entry
+    return None
+
+
+def split_path(path: str) -> tuple:
+    """/影视/电影/a.mkv -> ("影视/电影", "a.mkv")"""
+    normalized = (path or "").strip().strip("/")
+    if "/" in normalized:
+        parent, name = normalized.rsplit("/", 1)
+        return parent, name
+    return "", normalized
+
+
+def resolve_path(client: Client, path: str) -> tuple:
+    """解析路径指向的条目，返回 (父目录 CID, FileEntry)；找不到抛 ValidationError。"""
+    parent, name = split_path(path)
+    if not name:
+        raise ValidationError("路径不能为空")
+    parent_cid = resolve_path_to_cid(client, parent)
+    entry = find_entry(client, parent_cid, name)
+    if not entry:
+        raise ValidationError(f"未找到: /{parent + '/' if parent else ''}{name}")
+    return parent_cid, entry
 
 
 def resolve_path_to_cid(client: Client, path: str) -> str:
@@ -92,11 +155,7 @@ def resolve_path_to_cid(client: Client, path: str) -> str:
     for part in normalized.split("/"):
         if not part:
             continue
-        entries = list_files(client, current_cid, folders_only=True)
-        matched = next(
-            (e for e in entries if e.name == part and e.is_dir),
-            None,
-        )
+        matched = find_entry(client, current_cid, part, is_dir=True)
         if not matched:
             raise ValidationError(f"目录不存在: {normalized} (找不到「{part}」)")
         current_cid = matched.id
@@ -209,7 +268,8 @@ def export_directory_tree(
         },
         timeout=60,
     )
-    export_id = int(body.get("data", {}).get("export_id", 0))
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    export_id = int(data.get("export_id") or 0)
     if not export_id:
         raise APIError("导出请求未返回 export_id", response=body)
     return {"export_id": export_id}
@@ -228,8 +288,8 @@ def query_export_status(client: Client, export_id: int) -> dict:
     if isinstance(raw_data, dict) and raw_data.get("pick_code"):
         return {
             "status": "completed",
-            "file_id": str(raw_data["file_id"]),
-            "file_name": str(raw_data["file_name"]),
+            "file_id": str(raw_data.get("file_id") or ""),
+            "file_name": str(raw_data.get("file_name") or "目录树.txt"),
             "pick_code": str(raw_data["pick_code"]),
         }
     if isinstance(raw_data, dict):
@@ -241,7 +301,9 @@ def search_files_by_name(client: Client, cid: str, keyword: str, *,
     folders_only: bool = False,
     limit: int = 100,
 ) -> List[FileEntry]:
-    """在目录中按名称搜索文件（通过列出目录并过滤）
+    """在目录中按名称**子串**搜索文件（通过列出目录并过滤）
+
+    ⚠️ 子串匹配，仅用于展示/检索；删除、移动、重命名等定位操作请用 find_entry / resolve_path 精确匹配。
 
     Args:
         client: API 客户端
@@ -295,27 +357,7 @@ def search_files_global(
     count = int(body.get("count", 0) or 0)
     page_count = int(body.get("page_count", 0) or 0)
 
-    entries = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        fid = str(item.get("fid") or item.get("id") or "")
-        is_dir = bool(item.get("cid")) or item.get("is_dir", False)
-        name = str(item.get("n") or item.get("name") or "").strip()
-        if not name:
-            continue
-        entries.append(FileEntry(
-            id=fid or str(item.get("cid", "")),
-            name=name,
-            is_dir=is_dir,
-            cid=str(item.get("cid", "")),
-            size=int(item.get("s", 0) or 0),
-            pick_code=str(item.get("pc", "") or "").strip(),
-            sha1=str(item.get("sha", "") or "").upper(),
-            updated_at=str(item.get("te", "") or ""),
-            created_at=str(item.get("tp", "") or ""),
-        ))
-
+    entries = [e for e in (_parse_entry(item) for item in data) if e]
     return {"count": count, "entries": entries, "page_count": page_count}
 
 

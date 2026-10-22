@@ -1,12 +1,9 @@
 """115-agent MCP Server — 让 AI 直接操作 115 网盘"""
 
-import json
 import logging
-import os
-from typing import Any, Optional
+from typing import Optional
 
 from agent_115.client import Client, load_cookie
-from agent_115.exceptions import Agent115Error
 from agent_115.api import files as file_api
 from agent_115.api import share as share_api
 from agent_115.api import directory as dir_api
@@ -35,7 +32,7 @@ def create_server():
             return _client
         cookie = load_cookie()
         if not cookie:
-            raise RuntimeError("未设置 PAN115_COOKIE 环境变量")
+            raise RuntimeError("未找到 115 Cookie：请设置环境变量 PAN115_COOKIE 或在 .env 中写入 PAN115_COOKIE=...")
         _client = Client(cookie)
         return _client
 
@@ -54,11 +51,17 @@ def create_server():
         """
         try:
             client = _ensure_client()
-            cid = file_api.resolve_path_to_cid(client, path) if path != "/" else "0"
+            cid = file_api.resolve_path_to_cid(client, path)
             entries = file_api.list_files(client, cid, limit=limit, folders_only=dirs_only)
             if not entries:
                 return "(空目录)"
-            lines = [f"{'📁' if e.is_dir else '📄'} {e.name}" + (f"  {_fmt_size(e.size)}" if not e.is_dir else "") for e in entries]
+            # 附带 ID，供 rename_file / delete_files / move_files / batch_rename 直接使用
+            lines = [
+                f"{'📁' if e.is_dir else '📄'} {e.name}"
+                + (f"  {_fmt_size(e.size)}" if not e.is_dir else "")
+                + f"  [id:{e.id}]"
+                for e in entries
+            ]
             return f"📋 {path} 共 {len(entries)} 项:\n" + "\n".join(lines)
         except Exception as e:
             return f"❌ 错误: {e}"
@@ -88,7 +91,7 @@ def create_server():
         """
         try:
             client = _ensure_client()
-            cid = file_api.resolve_path_to_cid(client, parent_path) if parent_path != "/" else "0"
+            cid = file_api.resolve_path_to_cid(client, parent_path)
             result = file_api.delete_entries(client, file_ids, parent_cid=cid)
             return f"✅ 已删除 {len(result['deleted'])} 项"
         except Exception as e:
@@ -119,10 +122,10 @@ def create_server():
         """
         try:
             client = _ensure_client()
-            parent, name = path.strip("/").rsplit("/", 1) if "/" in path.strip("/") else ("", path.strip("/"))
+            parent, name = file_api.split_path(path)
             if not name:
                 return "❌ 路径不能为空"
-            parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
+            parent_cid = file_api.resolve_path_to_cid(client, parent)
             result = file_api.create_folder(client, name, parent_cid)
             return f"✅ 已创建目录: {result['name']}"
         except Exception as e:
@@ -153,7 +156,7 @@ def create_server():
         try:
             client = _ensure_client()
             info = share_api.parse_share_url(url)
-            cid = file_api.resolve_path_to_cid(client, save_path) if save_path != "/" else "0"
+            cid = file_api.resolve_path_to_cid(client, save_path)
             result = share_api.receive_share(client, info["share_code"],
                 receive_code=info["receive_code"], cid=cid)
             return f"✅ 接收成功: task_id={result['task_id']}"
@@ -161,22 +164,28 @@ def create_server():
             return f"❌ 接收分享失败: {e}"
 
     @mcp.tool()
-    def export_tree(path: str = "/", layer_limit: int = 25) -> str:
-        """🌳 导出 115 网盘目录树为文本（下载 TXT 内容）
+    def export_tree(path: str = "/", layer_limit: int = 25, save_to: str = "") -> str:
+        """🌳 导出 115 网盘目录树为文本（大目录生成需要数分钟）
 
         Args:
             path: 要导出的目录路径
             layer_limit: 目录层级限制
+            save_to: 可选，把完整目录树写入本机该文件路径（否则只返回前 1000 字符预览）
         """
         try:
             client = _ensure_client()
-            cid = file_api.resolve_path_to_cid(client, path) if path != "/" else "0"
+            cid = file_api.resolve_path_to_cid(client, path)
             result = dir_api.export_tree(client, cid, layer_limit=layer_limit)
             content = result["content"]
+            saved = ""
+            if save_to:
+                with open(save_to, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                saved = f"\n完整内容已保存到 {save_to}"
             preview = content[:1000]
             if len(content) > 1000:
-                preview += f"\n\n...（共 {len(content)} 字符，完整内容可下载）"
-            return f"🌳 目录树: {result['file_name']} ({_fmt_size(result['content_size'])})\n\n{preview}"
+                preview += f"\n\n...（共 {len(content)} 字符{'' if save_to else '，传入 save_to 可保存完整内容'}）"
+            return f"🌳 目录树: {result['file_name']} ({len(content)} 字符){saved}\n\n{preview}"
         except Exception as e:
             return f"❌ 导出目录树失败: {e}"
 
@@ -197,7 +206,7 @@ def create_server():
             for e in result["entries"]:
                 icon = "📁" if e.is_dir else "📄"
                 size_str = f" {_fmt_size(e.size)}" if not e.is_dir else ""
-                lines.append(f"  {icon} {e.name}{size_str}")
+                lines.append(f"  {icon} {e.name}{size_str}  [id:{e.id}]")
             return "\n".join(lines)
         except Exception as e:
             return f"❌ 搜索失败: {e}"
@@ -237,11 +246,18 @@ def create_server():
             return f"❌ 还原失败: {e}"
 
     @mcp.tool()
-    def recycle_bin_empty() -> str:
-        """🗑️ 清空回收站（不可恢复）"""
+    def recycle_bin_empty(confirm: bool = False) -> str:
+        """🗑️ 清空回收站（不可恢复）。必须先向用户确认，再以 confirm=true 调用。
+
+        Args:
+            confirm: 用户已明确同意清空回收站
+        """
+        if not confirm:
+            return "⚠️ 清空回收站不可恢复。请先征得用户明确同意，再以 confirm=true 调用。"
         try:
             client = _ensure_client()
-            file_api.empty_recycle_bin(client)
+            if not file_api.empty_recycle_bin(client)["ok"]:
+                return "❌ 清空回收站失败"
             return "✅ 回收站已清空"
         except Exception as e:
             return f"❌ 清空回收站失败: {e}"
@@ -291,15 +307,11 @@ def create_server():
         try:
             client = _ensure_client()
             mode = "direct" if mode == "direct" else "each"
-            parent, name = path.strip("/").rsplit("/", 1) if "/" in path.strip("/") else ("", path.strip("/"))
-            parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
-            entries = file_api.search_files_by_name(client, parent_cid, name)
-            files = [e for e in entries if not e.is_dir and e.name == name]
-            if not files:
-                files = [e for e in entries if not e.is_dir]
-            if not files:
-                return f"❌ 未找到: {path}"
-            e = files[0]
+            parent_cid, e = file_api.resolve_path(client, path)
+            if e.is_dir:
+                return f"❌ {path} 是目录，请使用 unzip_batch"
+            if not unzip_ops.is_archive_name(e.name):
+                return f"❌ 不是可云解压的压缩包: {e.name}"
             if not e.pick_code:
                 return f"❌ 缺少 pick_code: {e.name}"
             r = unzip_ops.unzip_one(
@@ -343,7 +355,7 @@ def create_server():
         try:
             client = _ensure_client()
             mode = "direct" if mode == "direct" else "each"
-            cid = file_api.resolve_path_to_cid(client, dir_path) if dir_path not in ("/", "") else "0"
+            cid = file_api.resolve_path_to_cid(client, dir_path)
             archives = unzip_ops.collect_archives_in_dir(client, cid)
             if not archives:
                 return f"📦 {dir_path}: 无压缩包"
@@ -374,19 +386,14 @@ def create_server():
         """
         try:
             client = _ensure_client()
-            # 尝试目录
-            try:
-                cid = file_api.resolve_path_to_cid(client, path) if path not in ("/", "") else "0"
-                archives = unzip_ops.collect_archives_in_dir(client, cid)
-            except Exception:
-                archives = []
-                cid = None
-
-            if not archives:
-                parent, name = path.strip("/").rsplit("/", 1) if "/" in path.strip("/") else ("", path.strip("/"))
-                parent_cid = file_api.resolve_path_to_cid(client, parent) if parent else "0"
-                entries = file_api.search_files_by_name(client, parent_cid, name)
-                archives = [e for e in entries if not e.is_dir and e.pick_code]
+            if file_api.split_path(path)[1]:
+                _, entry = file_api.resolve_path(client, path)
+                if entry.is_dir:
+                    archives = unzip_ops.collect_archives_in_dir(client, entry.id)
+                else:
+                    archives = [entry] if unzip_ops.is_archive_name(entry.name) and entry.pick_code else []
+            else:
+                archives = unzip_ops.collect_archives_in_dir(client, "0")
 
             if not archives:
                 return f"❌ 未找到压缩包: {path}"
@@ -410,6 +417,7 @@ def create_server():
 
 
 def _fmt_size(size: int) -> str:
+    size = float(size or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:
             return f"{size:.1f}{unit}"

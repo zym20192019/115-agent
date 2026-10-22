@@ -1,30 +1,38 @@
 # 115 Agent WebUI
 
-独立的 FastAPI + React/Vite 控制台，复用上级 `agent_115` SDK。提供文件浏览、云解压任务、Cookie 配置和实时 SSE 日志。
+FastAPI + React/Vite 控制台，复用上级 `agent_115` SDK：目录浏览（面包屑导航）、筛选 / 全盘搜索、新建文件夹、重命名、云解压任务（同名文件夹 / 当前目录、密码输入、取消、实时日志）。
 
-## 后端
+## 部署
 
 ```bash
 pip install -e ".[web]"
-$env:WEB_ADMIN_USER = "admin"
-$env:WEB_ADMIN_PASSWORD = "请修改为强密码"
-uvicorn web.backend.app:app --reload
+cd web/frontend && npm ci && npm run build && cd ../..
+
+export WEB_ADMIN_USER=admin
+export WEB_ADMIN_PASSWORD='请设置强密码'
+uvicorn web.backend.app:app --host 0.0.0.0 --port 8000
 ```
 
-后端默认 `http://localhost:8000`。开发前端运行后，访问 `http://localhost:5173`。
+后端会直接托管 `web/frontend/dist`，访问 `http://服务器:8000` 即可。前端与 API 必须同源（已移除 CORS），对外暴露时请放在 HTTPS 反向代理后面。
 
-## 前端
+- `WEB_ADMIN_PASSWORD` 未设置或为 `change-me` 时，启动时会随机生成一次性密码并打印到日志。
+- 115 Cookie 只在服务端读取（`PAN115_COOKIE` 环境变量 / `.env` / `$PAN115_HOME/.env`），每次请求实时读取，修改 `.env` 后无需重启。页面右上角显示是否已配置。
+- 115 Cookie 失效时接口返回 409（不会把你踢回登录页）；网络错误返回 502。
+- 登录会话保存在内存，有效期 24 小时，重启服务后需重新登录。
+
+## 开发
 
 ```bash
-cd web/frontend
-npm install
-npm run dev
+uvicorn web.backend.app:app --reload        # http://localhost:8000
+cd web/frontend && npm ci && npm run dev    # http://localhost:5173，/api 代理到 8000
 ```
 
-首次登录账号来自 `WEB_ADMIN_USER` / `WEB_ADMIN_PASSWORD`，默认值是 `admin` / `change-me`，仅适合本地开发。登录后在右上角设置中写入 115 Cookie。Cookie 保存在当前服务进程内存，不写入仓库文件；重启服务后需要重新配置。
+## 任务
 
-## 实时任务
+云解压在后端线程池执行，页面每 2 秒刷新任务状态，也可通过 `/api/jobs/{job_id}/events` 订阅 SSE（任务结束后发送 `event: end` 并关闭）。关闭页面不会停止任务。
 
-云解压在后端线程池执行，浏览器通过 `/api/jobs/{job_id}/events` 接收 SSE 事件。页面断开不会停止任务，重新打开页面可读取任务状态。密码压缩包会暂停在 `waiting_password`，通过页面提交密码后继续。
+- 加密压缩包会暂停在「等待密码」，在任务卡片中输入密码继续；10 分钟未输入则结束为 `password_required`。
+- 进行中的任务可取消。
+- 内存中保留最近 100 个已结束任务。
 
-生产部署需要在 HTTPS、反向代理和正式持久化会话/密钥存储后使用；当前任务和登录存储为内存实现，适合单机开发与内网测试。
+接口：`POST /api/jobs/unzip`，参数 `{parent_cid, file_id, mode: "each"|"direct", password, delete_zip, skip_pre}`（兼容旧的 `path` 参数）。
