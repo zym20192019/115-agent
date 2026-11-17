@@ -14,6 +14,7 @@ from agent_115.api import share as share_api
 from agent_115.api import directory as dir_api
 from agent_115.api import life as life_api
 from agent_115.ops import unzip as unzip_ops
+from agent_115.ops import change_ext as change_ext_ops
 
 log = logging.getLogger("115-agent")
 
@@ -149,6 +150,38 @@ def rename(ctx, path, new_name):
         _, entry = file_api.resolve_path(ctx.client, path)
         file_api.rename_entry(ctx.client, entry.id, new_name)
     click.secho(f"✓ 已重命名为: {new_name}", fg="green")
+
+
+# ── change-ext ──────────────────────────────
+
+@cli.command("change-ext")
+@click.argument("path")
+@click.option("--from", "old_suffix", required=True, help="原后缀（不区分大小写），如 .mp4.iso")
+@click.option("--to", "new_suffix", required=True, help="新后缀，如 .mp4；可为空字符串表示直接去掉")
+@click.option("-r", "--recursive", is_flag=True, help="递归子目录")
+@click.option("--dry-run", is_flag=True, help="只列出将要修改的文件")
+@click.option("--keep-original", is_flag=True, help="秒传成功后保留原文件（默认删进回收站）")
+@pass_ctx
+def change_ext(ctx, path, old_suffix, new_suffix, recursive, dry_run, keep_original):
+    """批量修改扩展名（秒传新名 + 原文件进回收站，不下载不上传内容）。PATH 为目录。"""
+    ctx.ensure_cookie()
+    cid = file_api.resolve_path_to_cid(ctx.client, path)
+
+    def show(r):
+        if ctx.json_output:
+            return
+        color = {"done": "green", "dry_run": "cyan", "skipped": "yellow"}.get(r.status, "red")
+        click.secho(f"[{r.status}] {r.old_name} → {r.new_name} {r.message}", fg=color)
+
+    summary = change_ext_ops.change_ext_in_dir(
+        ctx.client, cid, old_suffix=old_suffix, new_suffix=new_suffix,
+        recursive=recursive, dry_run=dry_run, delete_original=not keep_original, on_result=show,
+    )
+    if ctx.json_output:
+        click.echo(json.dumps([asdict(r) for r in summary.results], ensure_ascii=False, indent=2))
+        return
+    click.echo(f"共 {len(summary.results)} 个：完成 {summary.count('done')}，跳过 {summary.count('skipped')}，"
+               f"失败 {summary.count('failed')}" + ("（dry-run）" if dry_run else ""))
 
 
 # ── rm ──────────────────────────────

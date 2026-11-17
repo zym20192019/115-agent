@@ -58,10 +58,25 @@ Cookie 读取顺序：`-c/--cookie` 参数 → 环境变量 `PAN115_COOKIE` → 
 | `115 mv <path> <target>` | 移动文件/目录 |
 | `115 mkdir <path>` | 新建目录 |
 | `115 rm <path>` | 删除（移入回收站，`-y` 跳过确认） |
+| `115 change-ext <dir> --from .mp4.iso --to .mp4` | 批量改扩展名（见下） |
 
 `rename` / `mv` / `rm` / `unzip` 的路径按**完整名称精确匹配**（旧版本是模糊匹配，可能命中名称相近的其他文件）。
 
 目录树导出：提交成功后每 30 秒查询一次，最长等待 30 分钟，适合十万级文件的大目录。
+
+### 改扩展名 `change-ext`
+
+115 的普通重命名不允许改扩展名。`change-ext` 用秒传实现：以新文件名秒传一份同内容文件（只用 sha1、大小，加一次字节范围校验；不下载、不上传内容），确认新文件的 sha1 和大小一致后，把原文件删进回收站。
+
+```bash
+115 change-ext "/云下载/某合集" --from .mp4.iso --to .mp4 --dry-run   # 先看会改哪些
+115 change-ext "/云下载/某合集" --from .mp4.iso --to .mp4             # 执行
+115 change-ext "/某目录" --from .MP4 --to .mp4 -r --keep-original      # 递归，保留原文件
+```
+
+- 每个文件约 3 次请求（受全局限流约束），大目录请耐心等待。
+- 目标目录已有同名同内容文件时，只删原文件；同名但内容不同时跳过。
+- 需要 `cryptography` 库。库函数：`agent_115.ops.change_ext.rapid_rename()` / `change_ext_in_dir()`，底层协议见 `agent_115/api/upload.py`。
 | `115 search <keyword>` | 全局搜索（`-l` 条数、`-p` 页码） |
 | `115 share-receive <url>` | 接收分享（`-p` 保存目录） |
 | `115 recycle ls` | 列出回收站（`-l` / `-p`） |
