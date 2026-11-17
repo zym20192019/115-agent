@@ -47,6 +47,10 @@ def list_files(
         params["_"] = "1"
 
     body = client.get("/files", params=params)
+    # 115 对不存在/已删除的 cid 不报错，而是静默返回根目录内容；必须校验，否则调用方会把根目录当成目标目录操作
+    got_cid = str(body.get("cid", cid))
+    if str(cid) != "0" and got_cid != str(cid):
+        raise APIError(f"目录不存在或已删除: cid={cid}（115 返回了 cid={got_cid}）", response=body)
     data = body.get("data", []) if isinstance(body.get("data"), list) else body.get("data", {})
 
     # data 可能是 dict（单条）或 list
